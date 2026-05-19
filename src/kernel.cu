@@ -1,17 +1,17 @@
+#include <cstdint>
 #include "common_utils.h"
 
-constexpr int32_t NAIVE_TILE_SIZE = 16;
+constexpr uint32_t NAIVE_TILE_SIZE = 16;
 
 __global__ void sgemm_naive(const float* A, const float* B, float* C, int M, int N, int K) {
-    constexpr int32_t TILE_SIZE = 16;
-    __shared__ float tileA[TILE_SIZE][TILE_SIZE];
-    __shared__ float tileB[TILE_SIZE][TILE_SIZE];
+    __shared__ float tileA[NAIVE_TILE_SIZE][NAIVE_TILE_SIZE];
+    __shared__ float tileB[NAIVE_TILE_SIZE][NAIVE_TILE_SIZE];
 
     int row = blockIdx.y * blockDim.y + threadIdx.y;
     int col = blockIdx.x * blockDim.x + threadIdx.x;
 
     float elemSum = 0;
-    for (int ni = 0; ni < N; ni += TILE_SIZE) {
+    for (int ni = 0; ni < N; ni += NAIVE_TILE_SIZE) {
         // 1. copy in
         int aCol = ni + threadIdx.x;
         tileA[threadIdx.y][threadIdx.x] = (row < M && aCol < N) ? A[row * N + aCol] : 0;
@@ -20,7 +20,7 @@ __global__ void sgemm_naive(const float* A, const float* B, float* C, int M, int
         __syncthreads();
 
         // 2. compute
-        for (int ti = 0; ti < TILE_SIZE; ++ti) {
+        for (int ti = 0; ti < NAIVE_TILE_SIZE; ++ti) {
             elemSum += tileA[threadIdx.y][ti] * tileB[ti][threadIdx.x];
         }
         __syncthreads();

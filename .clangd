@@ -1,0 +1,6 @@
+CompileFlags:
+  CompilationDatabase: build
+  Remove:
+    # CMake/NVCC 会生成这些 CUDA 编译参数；clangd 只做代码分析，不认识 nvcc 专用参数。
+    - -forward-unknown-to-host-compiler
+    - --generate-code=*

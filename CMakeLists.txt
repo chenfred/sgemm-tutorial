@@ -15,6 +15,9 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
+# RTX 50 系列游戏显卡是 Blackwell 架构，对应 CUDA compute capability 12.0 / sm_120。
+set(CMAKE_CUDA_ARCHITECTURES 120)
+
 # 生成 build/compile_commands.json，方便 clangd 等工具做代码补全和跳转。
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 

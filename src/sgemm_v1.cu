@@ -3,7 +3,7 @@
 
 constexpr uint32_t NAIVE_TILE_SIZE = 16;
 
-__global__ void sgemm_naive(const float* A, const float* B, float* C, int M, int N, int K) {
+__global__ void sgemm_v1(const float* A, const float* B, float* C, int M, int N, int K) {
     __shared__ float tileA[NAIVE_TILE_SIZE][NAIVE_TILE_SIZE];
     __shared__ float tileB[NAIVE_TILE_SIZE][NAIVE_TILE_SIZE];
 
@@ -31,9 +31,9 @@ __global__ void sgemm_naive(const float* A, const float* B, float* C, int M, int
     }
 }
 
-void sgemm_kernel_do(const float* A, const float* B, float* C, int M, int N, int K) {
+void sgemm_v1_do(const float* A, const float* B, float* C, int M, int N, int K) {
     dim3 blockDim{NAIVE_TILE_SIZE, NAIVE_TILE_SIZE};
     dim3 gridDim{CeilDiv<uint32_t>(K, blockDim.x), CeilDiv<uint32_t>(M, blockDim.y)};
 
-    sgemm_naive<<<gridDim, blockDim, 0, nullptr>>>(A, B, C, M, N, K);
+    sgemm_v1<<<gridDim, blockDim, 0, nullptr>>>(A, B, C, M, N, K);
 }

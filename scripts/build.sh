@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# 先定位脚本所在目录，再推导项目根目录。
+# 这样无论从哪个目录执行 scripts/build.sh，后面的相对路径都按项目根目录计算。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_ROOT}"
+
 BUILD_DIR="build"
 TARGET="./${BUILD_DIR}/sgemm"
 

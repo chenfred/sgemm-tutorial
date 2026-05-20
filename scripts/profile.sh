@@ -2,6 +2,12 @@
 
 set -euo pipefail
 
+# 先定位脚本所在目录，再推导项目根目录。
+# 这样无论从哪个目录执行 scripts/profile.sh，report/ 和 build/ 都会落在项目根目录下。
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
+cd "${PROJECT_ROOT}"
+
 REPORT_DIR="report"
 TARGET="./build/sgemm"
 

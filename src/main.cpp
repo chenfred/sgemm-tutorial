@@ -39,7 +39,7 @@ static void test_sgemm(int M, int N, int K, sgemm_func_t sgemm_func, std::string
                 sum += h_A[i * N + j] * h_B[j * K + k];
             float actual = h_C[i * K + k];
             if (fabs(actual - sum) > 1e-3f) {
-                printf("[%s]  Mismatch at (%d,%d): %f != %f\n", caseName.c_str(), i, k, actual, sum);
+                printf("[%s]  Mismatch at (%d,%d): actual %f != expected %f\n", caseName.c_str(), i, k, actual, sum);
                 errors++;
             }
         }
@@ -62,9 +62,8 @@ static void test_sgemm(int M, int N, int K, sgemm_func_t sgemm_func, std::string
 }
 
 int main() {
-    test_sgemm(1024, 1024, 1024, sgemm_naive_do, "warmup");
-    test_sgemm(1024, 1024, 1024, sgemm_naive_do, "sgemm_naive");
-    test_sgemm(1024, 1024, 1024, sgemm_v1_do, "sgemm_v1");
+    test_sgemm(1024, 4096, 1024, sgemm_naive_do, "sgemm_naive");
+    test_sgemm(1024, 4096, 1024, sgemm_v1_do, "sgemm_v1");
 
     printf("\nAll tests done.\n");
 

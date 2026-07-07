@@ -72,6 +72,7 @@ int main() {
     for (auto& c : cases) {
         test_sgemm(c[0], c[1], c[2], sgemm_naive_do, "sgemm_naive");
         test_sgemm(c[0], c[1], c[2], sgemm_v1_do, "sgemm_v1");
+        test_sgemm(c[0], c[1], c[2], sgemm_v2_do, "sgemm_v2");
     }
 
     printf("\nAll tests done.\n");

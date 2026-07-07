@@ -52,7 +52,7 @@ output_name="${output_name%.ncu-rep}"
 mkdir -p "${REPORT_DIR}"
 
 ncu --set full \
-    --import-source on \
+    --import-source yes \
     -f \
     -o "${REPORT_DIR}/${output_name}" \
     "${TARGET}"

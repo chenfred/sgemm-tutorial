@@ -32,9 +32,9 @@ add_executable(sgemm ${SGEMM_SOURCES})
 target_include_directories(sgemm PRIVATE include)
 target_link_libraries(sgemm PRIVATE CUDA::cudart)
 
-# 为 Nsight Compute 源码/SASS 对应关系保留行号信息，只传给 CUDA 编译单元。
+# 为 Nsight Compute 源码/SASS 对应关系保留行号信息，以及完整调试符号信息，只传给 CUDA 编译单元。
 target_compile_options(sgemm PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo>
+    $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo -g>
 )
 
 # 显式指定可执行文件输出到构建目录根部，即 cmake -B build 时生成 build/sgemm。

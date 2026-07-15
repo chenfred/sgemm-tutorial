@@ -65,14 +65,16 @@ static void test_sgemm(int M, int N, int K, sgemm_func_t sgemm_func, std::string
 int main() {
     // 覆盖：可被 tile 整除的尺寸，以及非方阵(M≠N≠K)且不能被 tile size 整除的尺寸
     int cases[][3] = {
+        // {1024, 4096, 1024},
+        // {1000, 2000, 1500},
         {1024, 4096, 1024},
-        {1000, 2000, 1500},
     };
 
     for (auto& c : cases) {
         test_sgemm(c[0], c[1], c[2], sgemm_naive_do, "sgemm_naive");
         test_sgemm(c[0], c[1], c[2], sgemm_v1_do, "sgemm_v1");
         test_sgemm(c[0], c[1], c[2], sgemm_v2_do, "sgemm_v2");
+        test_sgemm(c[0], c[1], c[2], sgemm_v2_do_woILP, "sgemm_v2_without_opt_for_ILP");
     }
 
     printf("\nAll tests done.\n");

@@ -5,9 +5,15 @@
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- 当前教学基线只保留 `sgemm_v0` 与 `sgemm_v1`。新增版本需要在 `include/sgemm_func.h` 声明，并注册到 `src/main.cpp` 的 `IMPLEMENTATIONS`。
+- `src/main.cpp` 的当前教学基线只注册 `sgemm_v0` 与 `sgemm_v1`；历史试验源码
+  `sgemm_trial_v1_1.cu`、`sgemm_trial_v1_2.cu` 及其 host 声明保留在工程中，但有意不注册到
+  `IMPLEMENTATIONS`，避免干扰日常运行和 NCU 报告。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
+- `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
+  输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
+  accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`
+  和非整除边界用例 `37×53×29` 的 FP32 正确性校验。
 - `src/warmup.cu` 提供独立 warmup；`src/verify.cpp` 提供 OpenMP 多线程 CPU golden 与 verify。
 - 默认只运行 `1024×4096×1024`，以保持 NCU 报告简单。开发新 kernel 时必须临时加入至少一个 M/N/K 不相等且不能被 tile 整除的用例。
 

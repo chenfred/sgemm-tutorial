@@ -1,83 +1,119 @@
-#include <cmath>
-#include <string>
+#include <cstdio>
+#include <cuda_profiler_api.h>
+#include <string_view>
+#include <vector>
 #include "common_utils.h"
 #include "sgemm_func.h"
+#include "sgemm_verify.h"
 
-static void test_sgemm(int M, int N, int K, sgemm_func_t sgemm_func, std::string caseName = "testcase") {
+struct SgemmImplementation {
+    const char* name;
+    sgemm_func_t func;
+};
+
+struct SgemmResult {
+    float* d_C = nullptr;
+    float elapsed = 0;
+};
+
+static const std::vector<SgemmImplementation> IMPLEMENTATIONS = {
+    {"sgemm_v0", sgemm_v0_do},
+    {"sgemm_v1", sgemm_v1_do},
+};
+
+static void test_sgemm(int M, int N, int K, bool dry_run) {
     // 标准 SGEMM 语义：C(M,N) = A(M,K) * B(K,N)
-    const size_t bytes_a = M * K * sizeof(float);
-    const size_t bytes_b = K * N * sizeof(float);
-    const size_t bytes_c = M * N * sizeof(float);
+    const size_t bytes_a = static_cast<size_t>(M) * K * sizeof(float);
+    const size_t bytes_b = static_cast<size_t>(K) * N * sizeof(float);
+    const size_t bytes_c = static_cast<size_t>(M) * N * sizeof(float);
 
-    float* h_A = (float*)malloc(bytes_a);
-    float* h_B = (float*)malloc(bytes_b);
-    float* h_C = (float*)malloc(bytes_c);
-    for (int i = 0; i < M * K; i++)
-        h_A[i] = float(i % 100) / 100.0f;
-    for (int i = 0; i < K * N; i++)
-        h_B[i] = float(i % 100) / 100.0f;
+    std::vector<float> h_A(static_cast<size_t>(M) * K);
+    std::vector<float> h_B(static_cast<size_t>(K) * N);
+    std::vector<float> h_C(static_cast<size_t>(M) * N);
+    for (size_t i = 0; i < h_A.size(); ++i) {
+        h_A[i] = static_cast<float>(i % 100) / 100.0f;
+    }
+    for (size_t i = 0; i < h_B.size(); ++i) {
+        h_B[i] = static_cast<float>(i % 100) / 100.0f;
+    }
 
-    float *d_A, *d_B, *d_C;
+    std::vector<float> golden;
+    if (!dry_run) {
+        golden = sgemm_golden(h_A, h_B, M, N, K);
+    }
+
+    float *d_A, *d_B, *d_warmup;
     CUDA_CHECK(cudaMalloc(&d_A, bytes_a));
     CUDA_CHECK(cudaMalloc(&d_B, bytes_b));
-    CUDA_CHECK(cudaMalloc(&d_C, bytes_c));
-    CUDA_CHECK(cudaMemcpy(d_A, h_A, bytes_a, cudaMemcpyHostToDevice));
-    CUDA_CHECK(cudaMemcpy(d_B, h_B, bytes_b, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMalloc(&d_warmup, bytes_c));
+    CUDA_CHECK(cudaMemcpy(d_A, h_A.data(), bytes_a, cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d_B, h_B.data(), bytes_b, cudaMemcpyHostToDevice));
+
+    std::vector<SgemmResult> results(IMPLEMENTATIONS.size());
+    for (auto& result : results) {
+        CUDA_CHECK(cudaMalloc(&result.d_C, bytes_c));
+    }
 
     CudaTimer timer;
-    timer.tic();
-    sgemm_func(d_A, d_B, d_C, M, N, K);
-    float elapsed = timer.toc();
 
-    CUDA_CHECK(cudaMemcpy(h_C, d_C, bytes_c, cudaMemcpyDeviceToHost));
+    // 每个 Application Replay pass 都会重新运行 warmup；只在正式 kernel 期间启用 profiler。
+    for (size_t i = 0; i < IMPLEMENTATIONS.size(); ++i) {
+        warmup_do(d_A, d_B, d_warmup, M, N, K);
+        CUDA_CHECK(cudaDeviceSynchronize());
 
-    // CPU reference: C(M,N) = A(M,K) * B(K,N)
-    int errors = 0;
-    for (int i = 0; i < M && errors < 10; i++) {
-        for (int j = 0; j < N && errors < 10; j++) {
-            float sum = 0.0f;
-            for (int p = 0; p < K; p++)
-                sum += h_A[i * K + p] * h_B[p * N + j];
-            float actual = h_C[i * N + j];
-            if (fabs(actual - sum) > 1e-3f) {
-                printf("[%s]  Mismatch at (%d,%d): actual %f != expected %f\n", caseName.c_str(), i, j, actual, sum);
-                errors++;
-            }
+        if (!dry_run) {
+            timer.tic();
+        }
+        CUDA_CHECK(cudaProfilerStart());
+        IMPLEMENTATIONS[i].func(d_A, d_B, results[i].d_C, M, N, K);
+        if (!dry_run) {
+            results[i].elapsed = timer.toc();
+        }
+        // 不依赖 cudaProfilerStop、D2H 或 cudaFree 的隐式行为，明确等待正式 kernel 完成。
+        CUDA_CHECK(cudaDeviceSynchronize());
+        CUDA_CHECK(cudaProfilerStop());
+    }
+
+    for (size_t implementationIndex = 0; implementationIndex < IMPLEMENTATIONS.size(); ++implementationIndex) {
+        CUDA_CHECK(cudaMemcpy(h_C.data(), results[implementationIndex].d_C, bytes_c, cudaMemcpyDeviceToHost));
+
+        if (!dry_run) {
+            const bool pass = sgemm_verify(h_C, golden, M, N);
+            float elapsed = results[implementationIndex].elapsed;
+            float gflops = (2.0f * M * N * K) / (elapsed / 1000.0f) / 1e9f;
+            printf("[%s]  M=%-5d N=%-5d K=%-5d  time=%8.3f ms  GFLOPS=%8.2f  %s",
+                   IMPLEMENTATIONS[implementationIndex].name, M, N, K, elapsed, gflops, pass ? "PASS" : "FAIL");
+            printf("\n");
         }
     }
 
-    float gflops = (2.0f * M * N * K) / (elapsed / 1000.0f) / 1e9f;
-    bool pass = (errors == 0);
-    printf("[%s]  M=%-5d N=%-5d K=%-5d  time=%8.3f ms  GFLOPS=%8.2f  %s", caseName.c_str(), M, N, K, elapsed, gflops,
-           pass ? "PASS" : "FAIL");
-    if (!pass)
-        printf("[%s]  errors=%d", caseName.c_str(), errors);
-    printf("\n");
-
+    for (auto& result : results) {
+        CUDA_CHECK(cudaFree(result.d_C));
+    }
     CUDA_CHECK(cudaFree(d_A));
     CUDA_CHECK(cudaFree(d_B));
-    CUDA_CHECK(cudaFree(d_C));
-    free(h_A);
-    free(h_B);
-    free(h_C);
+    CUDA_CHECK(cudaFree(d_warmup));
 }
 
-int main() {
-    // 覆盖：可被 tile 整除的尺寸，以及非方阵(M≠N≠K)且不能被 tile size 整除的尺寸
+int main(int argc, char** argv) {
+    const bool dry_run = argc == 2 && std::string_view(argv[1]) == "--dry-run";
+    if (argc > 1 && !dry_run) {
+        printf("Usage: %s [--dry-run]\n", argv[0]);
+        return 1;
+    }
+
+    // 当前仅保留用于对比 v0/v1 NCU 报告的基准尺寸。
     int cases[][3] = {
-        // {1024, 4096, 1024},
-        // {1000, 2000, 1500},
         {1024, 4096, 1024},
     };
 
     for (auto& c : cases) {
-        test_sgemm(c[0], c[1], c[2], sgemm_naive_do, "sgemm_naive");
-        test_sgemm(c[0], c[1], c[2], sgemm_v1_do, "sgemm_v1");
-        test_sgemm(c[0], c[1], c[2], sgemm_v2_do, "sgemm_v2");
-        test_sgemm(c[0], c[1], c[2], sgemm_v2_do_woILP, "sgemm_v2_without_opt_for_ILP");
+        test_sgemm(c[0], c[1], c[2], dry_run);
     }
 
-    printf("\nAll tests done.\n");
+    if (!dry_run) {
+        printf("\nAll tests done.\n");
+    }
 
     return 0;
 }

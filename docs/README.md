@@ -1,23 +1,28 @@
-# v3 前置学习材料
+# v2 前置学习材料
 
-这组文档用于在实现 `sgemm_v3` 前，完成一次从“看懂 profiler”到“根据证据选择优化”的闭环。
+当前仓库只保留两个 kernel：`sgemm_v0` 与 `sgemm_v1`。配套报告是：
+
+```text
+ncu-rep/sgemm.v0v1.0719.ncu-rep
+```
 
 建议按以下顺序阅读和实践：
 
-1. [使用 Nsight Compute GUI 分析 naive、v1 与 v2](./ncu-gui-sgemm-analysis.md)
-   - 从零认识 `.ncu-rep`、Summary、Details、Source、Baseline。
-   - 使用 `report/sgemm_nv1v2_2.ncu-rep` 完整分析四个 kernel。
-   - 学会区分吞吐瓶颈、延迟隐藏不足、资源限制和编译器代码生成差异。
-2. [从 v2 到 v3：学习路线与实验顺序](./v2-to-v3-learning-roadmap.md)
-   - 解释为什么下一步应优先学习二维寄存器 tiling，而不是立即堆更多 ILP 或直接上 double buffering。
-   - 给出 v3 前应完成的测量、SASS、访存、寄存器 tiling 和流水化练习。
+1. [使用 Nsight Compute GUI 分析 v0 与 v1](./ncu-gui-sgemm-analysis.md)
+   - 从零认识 Summary、Details、Source、Raw 与 PM Sampling。
+   - 学会区分 DRAM、L1/TEX、shared-memory/MIO、FMA pipeline、调度与 occupancy。
+   - 按“证据 → 推断 → 下一实验”分析当前报告，而不是寻找一个万能百分比。
+2. [从 v1 到 v2：学习路线与实验顺序](./v1-to-v2-learning-roadmap.md)
+   - 解释 v1 的真正收益中，数据复用、指令数下降与 ILP 各占什么角色。
+   - 说明为什么下一步优先做二维 register tiling，而不是继续交换循环或立刻上 double buffering。
+   - 给出实现下一个版本前应补齐的 benchmark、SASS、shared memory 和寄存器基础。
 
-推荐的学习方式不是一次记住所有指标，而是每读完一节就在 GUI 中完成对应操作，并写下一句“证据 → 推断 → 下一实验”。例如：
+推荐每读完一节就回到 NCU GUI 完成对应操作，并写一句：
 
 ```text
-证据：v2 的 MIO Throttle 最大，L1/TEX active throughput 约 98%，DRAM 仅约 5%。
-推断：当前主要压力更接近 shared-memory/MIO 路径，而不是显存带宽。
-实验：增加 N 方向寄存器复用，观察每次 FMA 对应的 shared load 是否下降。
+证据：v1 的 shared-load 指令从 167.8 M 降到 67.1 M，MIO Throttle 从 21.94 降到 12.37。
+推断：v1 的主要收益来自每线程计算 4 个输出后减少了线程数和 shared-memory 指令压力。
+实验：下一版在 M/N 两个方向都做寄存器复用，观察 shared load/FMA 是否继续下降。
 ```
 
-这比单独追求某个指标达到 100%，更接近真实的 CUDA 性能优化过程。
+不要试图一次记住所有指标。先能沿着一条完整证据链做出可验证的下一步，学习效率会更高。

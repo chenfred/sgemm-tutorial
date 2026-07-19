@@ -13,27 +13,37 @@ TARGET="./${BUILD_DIR}/sgemm"
 
 clean=0
 run=0
+run_args=()
 
 usage() {
-    echo "Usage: $0 [--clean] [--run]"
-    echo "  --clean  Remove build/ and configure from scratch before building"
-    echo "  --run    Run ${TARGET} after a successful build"
+    echo "Usage: $0 [--clean] [--run [PROGRAM_ARG...]]"
+    echo "  --clean                Remove build/ and configure from scratch before building"
+    echo "  --run [PROGRAM_ARG...] Run ${TARGET} after building and pass all remaining arguments to it"
+    echo
+    echo "Examples:"
+    echo "  $0 --run"
+    echo "  $0 --clean --run --dry-run"
+    echo "  $0 --run --param1 val1 --param2 val2"
 }
 
-for arg in "$@"; do
-    case "${arg}" in
+while [[ "$#" -gt 0 ]]; do
+    case "$1" in
         --clean)
             clean=1
+            shift
             ;;
         --run)
             run=1
+            shift
+            run_args=("$@")
+            break
             ;;
         -h|--help)
             usage
             exit 0
             ;;
         *)
-            echo "Unknown argument: ${arg}" >&2
+            echo "Unknown argument: $1" >&2
             usage >&2
             exit 1
             ;;
@@ -48,5 +58,5 @@ cmake -S . -B "${BUILD_DIR}"
 cmake --build "${BUILD_DIR}"
 
 if [[ "${run}" -eq 1 ]]; then
-    "${TARGET}"
+    "${TARGET}" "${run_args[@]}"
 fi

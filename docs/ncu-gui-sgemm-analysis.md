@@ -1,411 +1,470 @@
-# 使用 Nsight Compute GUI 分析 naive、v1 与 v2
+# 使用 Nsight Compute GUI 分析 `sgemm_v0` 与 `sgemm_v1`
 
-本文配套报告：`report/sgemm_nv1v2_2.ncu-rep`。
+本文配套报告：`ncu-rep/sgemm.v0v1.0719.ncu-rep`。
 
-目标不是背指标，而是学会一条可复用的分析链：
-
-```text
-确认实验可比
-  → SOL 定位忙碌子系统
-  → Scheduler 判断延迟是否藏住
-  → Warp State 找“为什么不能发射”
-  → Memory / Compute 找具体管线
-  → Occupancy 检查资源约束
-  → Source / SASS 回到代码
-  → 提出一个可证伪的优化实验
-```
-
-本文针对 Nsight Compute 2025.3.x。不同版本的按钮位置可能略有变化，但页面和指标含义基本一致。
-
-## 1. 先理解这份报告记录了什么
-
-报告包含同一组矩阵尺寸 `M=1024, N=4096, K=1024` 的四次 kernel launch：
-
-| GUI 中的 kernel | 源码入口 | block | grid | 每线程输出 |
-|---|---|---:|---:|---:|
-| `sgemm_naive` | `sgemm_naive_do` | `(16,16,1)` | `(256,64,1)` | 1 |
-| `sgemm_v1` | `sgemm_v1_do` | `(16,16,1)` | `(128,32,1)` | 4（2×2） |
-| `sgemm_v2<1>` | `sgemm_v2<true>` | `(32,8,1)` | `(128,32,1)` | 4（4×1） |
-| `sgemm_v2<0>` | `sgemm_v2<false>` | `(32,8,1)` | `(128,32,1)` | 4（4×1） |
-
-这里的模板参数非常重要：
-
-- `v2<1>` 对应 `OptForILP=true`，源码把 `t` 放外层，把四个累加器的更新放内层。
-- `v2<0>` 对应 `OptForILP=false`，源码把累加器 `ii` 放外层，每个累加器先完成整个 `t` 循环。
-
-四个 kernel 都完成同样的 SGEMM 数学工作，因此可以比较“为了完成相同工作，硬件付出了什么代价”。
-
-## 2. 打开报告与建立 baseline
-
-在带 Nsight Compute GUI 的机器上：
-
-1. 启动 `ncu-ui`，选择 `File → Open`。
-2. 打开 `report/sgemm_nv1v2_2.ncu-rep`。
-3. 报告包含多个结果时，默认先显示 **Summary Page**。
-4. 在顶部 Launch 下拉框或 Summary 表中选择 `sgemm_naive`。
-5. 点击 `Compare → Add Baseline`，把 naive 设为 baseline。
-6. 再选择 v1 或 v2，Details 和 Raw 页面会显示相对 baseline 的变化。
-
-第一次阅读建议分三轮比较：
+配套报告采集环境为 NVIDIA GeForce RTX 5080、Compute Capability 12.0、Nsight Compute 2026.1.1。输入统一为：
 
 ```text
-naive → v1       看“做更多输出但代码复杂化”的代价
-naive → v2<1>    看 v2 的整体收益来自哪里
-v2<1> → v2<0>    看循环顺序是否真的改变机器代码和性能
+M = 1024, N = 4096, K = 1024
+C(M,N) = A(M,K) × B(K,N)
 ```
 
-不要一次选很多 kernel 后只盯颜色。每一轮只回答一个问题。
+本文面向第一次系统使用 NCU GUI 的读者。目标不是背诵所有指标，而是学会一套可复用的分析顺序。
 
-## 3. 阅读前必须知道的四个陷阱
+## 1. 先看结论，再学习如何得到它
 
-### 3.1 NCU 的 Duration 不是稳定 benchmark
+当前报告支持以下结论：
 
-`--set full` 往往需要多次 replay kernel 来收集不同硬件计数器。不同 launch 的 GPU 频率也可能不同。本报告中：
+1. v1 的优化方向正确。在频率可比的正式报告中，NCU Duration 为 `1.684 ms → 0.706 ms`，约加速 2.39 倍。
+2. v1 的核心不是“occupancy 更高”。它的 achieved occupancy 反而从 98.67% 降到 80.08%。
+3. 核心收益是每线程计算 4 个输出，使总线程数降为四分之一，并提高 tile 内的数据复用：
+   - global-load SASS 指令减半；
+   - shared-load SASS 指令降到 v0 的 40%；
+   - 总动态指令减少约 40%；
+   - FMA pipeline 利用率从 9.96% 提高到 22.37%；
+   - 每 scheduler 发射率从 0.28 提高到 0.41 warp/cycle。
+4. v1 仍未把 FP32 FMA 资源打满。当前最突出的压力仍是 shared-memory/MIO 路径：L1/TEX throughput 约 97%，最大 stall 是 MIO Throttle。
+5. 下一步应提高 shared→register 数据的复用率，即二维 register tiling；double buffering 不是当前第一优先级。
 
-| kernel | NCU Duration | SM Frequency |
+后续各节会说明怎样从 GUI 中独立得到这些结论。
+
+## 2. 报告为什么只剩两个 kernel
+
+两个版本的映射如下：
+
+| kernel | block | grid | block tile | 每线程输出 |
+|---|---:|---:|---:|---:|
+| `sgemm_v0` | `(16,16,1)` | `(256,64,1)` | `16×16` | 1 |
+| `sgemm_v1` | `(32,8,1)` | `(128,32,1)` | `32×32` | 4（M 方向 `4×1`） |
+
+两者计算的是同一个矩阵乘法，逻辑工作量相同：
+
+```text
+2 × M × N × K = 8,589,934,592 FLOP
+```
+
+v0 启动 `16,384 × 256 = 4,194,304` 个线程，每线程写一个 C 元素。v1 启动 `4,096 × 256 = 1,048,576` 个线程，每线程写四个 C 元素。这是后面理解指令数变化的第一把钥匙。
+
+## 3. 如何重新生成并打开报告
+
+先编译、验证正确性，再采样：
+
+```bash
+scripts/build.sh
+./build/sgemm
+scripts/profile.sh -o sgemm.v0v1.0719
+```
+
+从命令行打开 GUI：
+
+```bash
+ncu-ui ncu-rep/sgemm.v0v1.0719.ncu-rep
+```
+
+也可以先启动 `ncu-ui`，再使用 `File → Open` 打开报告。
+
+报告中应只有两个结果：`sgemm_v0` 和 `sgemm_v1`。程序用 `cudaProfilerStart/Stop` 只标记正式 kernel，warmup 不会出现在报告里；这里没有“第几次调用”的数字约定。
+
+脚本使用 Application Replay。本次 NCU 2026.1.1 的 `full` 采集进度显示 40 个 pass；具体数量由 NCU 根据版本、section 和指标组合决定，不应写进代码。每个 pass 都会重新启动一次 `build/sgemm --dry-run`，所以每个正式 kernel 在每个 pass 中都会重新 warmup。`--dry-run` 仍执行数据生成、H2D、kernel 和 D2H，只跳过 CPU golden、正确性校验和应用侧计时输出；在 profiling 前必须先单独运行 `./build/sgemm`，确认两项均为 `PASS`。
+
+## 4. 先处理两个测量陷阱
+
+### 4.1 NCU 采集期间的应用侧计时不能用
+
+脚本使用 `--set full`，需要数十个 application replay pass。NCU 会在不同进程中收集不同指标，再把它们合并成一个结果；这与普通的一次 kernel launch 不是同一种执行环境。
+
+当前脚本传入 `--dry-run`，程序会跳过 CPU golden/verify 和 CUDA Event 输出，避免把校验成本带进 replay，也避免展示没有比较意义的应用侧时间。如果手工改掉该选项，profiling 期间打印的时间仍不能当作真实单次 kernel 时间。分析报告时应看：
+
+```text
+Details → GPU Speed Of Light Throughput → Duration
+```
+
+日常性能比较则看带 warmup 和多次迭代的 CUDA Event benchmark。当前 `main.cpp` 会在每个正式 kernel 前做长 warmup，但仍只计时一次，适合教学验证，不是最终严谨 benchmark。
+
+### 4.2 频率不同会污染 Duration
+
+NVIDIA 官方说明：应用中的第一个 kernel 经常处于较低时钟，replay 的不同 pass 也可能处于不同频率。因此比较 Duration 前，先同时检查：
+
+- `SM Frequency`
+- `DRAM Frequency`
+- `Duration`
+
+默认 Kernel Replay 只在第一次原始 launch 前执行应用的 warmup，后面的 metric pass 会单独重放正式 kernel；因此仅在源码里 warmup 一次仍可能出现低频。改用 Application Replay 后，正式报告为：
+
+| 指标 | v0 | v1 | 差异 |
+|---|---:|---:|---:|
+| SM Frequency | 2.950 GHz | 2.936 GHz | 约 0.47% |
+| DRAM Frequency | 14.9866 GHz | 14.9868 GHz | 小于 0.01% |
+| NCU Duration | 1.684 ms | 0.706 ms | v1 约快 2.39 倍 |
+
+连续三份 Application Replay 报告中的 v0/v1 频率与 Duration 都接近，可以进行入门级对比。动态 Boost 仍受温度、功耗和后台负载影响，换环境后应重新检查本表，而不是永久相信一次结果。
+
+### 4.3 为什么当前脚本不再使用 NCU 锁频
+
+`scripts/profile.sh` 显式使用：
+
+```bash
+--clock-control none
+--profile-from-start off
+--replay-mode application
+```
+
+`none` 表示 NCU 不修改 GPC 或 memory frequency，所以脚本既不会建立锁频，也不存在退出后忘记解锁的问题。控制台中的 “Running with unmodified GPU clocks” 警告是有意选择，不是错误。
+
+本机升级后的 NCU 2026.1.1 提供 `base`、`boost`、`force-boost`、`none`、`reset`，且默认值已是 `boost`。脚本仍显式选择 `none`，避免工具版本升级悄悄改变实验策略；`force-boost` 也不是当前教学分析的默认选择。
+
+为什么不使用 `base` 等锁频模式？NVIDIA 文档明确说明，实际时钟仍可能因驱动支持程度而变化。本机重复实验也观察到：即使采集 warmup，`base` 下的频率仍会随 replay 模式和 pass 数变化。它有动作，但没有实现本任务需要的稳定可比频率。
+
+Application Replay 的代价是采集时间从约十几秒增加到约一分钟；收益是每个 pass 都重新执行 warmup，而且报告仍只包含 v0/v1。只有两者频率接近时才比较 Duration。
+
+### 4.4 NCU 有没有“前 m 次只 warmup，后面自动采集”的参数
+
+没有一个参数能直接表达这套语义：
+
+- `--launch-skip m` 只忽略应用本来就会发射的前 m 个匹配 kernel，不会替应用额外执行它们；
+- `--launch-count n` 只限制收集多少个匹配结果；
+- Kernel Replay 的 pass 数由 NCU 根据指标集决定，但每个 pass 都属于指标采集，不能指定前几次 pass 只 warmup、不计入结果；
+- Application Replay 同样由 NCU 决定 pass 数，但会为每个 pass 重新启动整个应用。于是应用中的 warmup 会自然重跑，这正是当前脚本采用的机制。
+
+因此当前方案把职责分开：应用定义“如何 warmup、哪些 kernel 是正式区间”，NCU 决定 `full` 指标集需要多少个 pass。
+
+### 4.5 为什么没有改成 Range Replay
+
+NCU 的 Range Replay 确实能把 H2D、D2H 和 CPU 校验留在重放范围之外。实测过的代码边界如下：
+
+```cpp
+cudaMemcpy(/* H2D */);
+
+for (const auto& implementation : IMPLEMENTATIONS) {
+    warmup_do(/* ... */);
+    cudaDeviceSynchronize();
+
+    cudaProfilerStart();
+    implementation.func(/* 单次正式 kernel launch */);
+    cudaDeviceSynchronize();
+    cudaProfilerStop();
+}
+
+cudaMemcpy(/* D2H */);
+sgemm_verify(/* ... */);
+```
+
+对应命令的核心是：
+
+```bash
+ncu --set full --clock-control none --replay-mode range ./build/sgemm
+```
+
+这套布局能够正确运行：进程只启动一次，NCU 捕获两个 range，每个 range 里只有一个正式 kernel，最后 v0/v1 都能通过校验。官方定义也说明，一个 range 包含 Start/Stop 之间所有线程发出的 CUDA API 调用和 kernel；收集到的指标属于整个 range，而不是其中某个独立 kernel。参见 [Range Replay](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html#range-replay) 与 [CLI `--replay-mode`](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html#command-line-options)。
+
+但它不适合当前“同一份 `full` 报告精确比较两个短 kernel”的目标，原因有三点：
+
+1. 范围外的 warmup 不会随每个 metric pass 重放。`none + full` 实测中，range 0 的 v0 为 `2.951 GHz / 1.766 ms`，range 1 的 v1 却降为 `1.744 GHz / 1.364 ms`；DRAM frequency 也从 `14.987 GHz` 降到 `8.882 GHz`。
+2. 把顺序改成 v1→v0 后，第一个 v1 为 `2.946 GHz`，第二个 v0 降为 `2.248 GHz`。这证明主要是 range 的位置效应，而不是 v1 天生只能低频。
+3. `base` 在三指标短采集中看似稳定，但 `full` 中 v0/v1 又变成 `1.556/1.126 GHz`。不同指标来自不同 pass，短采集稳定不能证明 `full` 报告内部可比。
+
+还有两个 NCU 2026.1.1 的使用细节：
+
+- `--profile-from-start off` 与 Range Replay 不能同时使用；Range Replay 已经由 Start/Stop 定义边界。
+- `--import-source yes` 与 Range Replay 的组合会被 CLI 拒绝。报告仍能在本机从原路径解析 CUDA/SASS 关联，但不会把源码永久嵌入报告。
+
+Profiler Start/Stop 产生的结果名也只是 `range`，`launch__kernel_name` 为空；只能靠结果 ID、顺序或 block/grid 配置映射 v0/v1。相比之下，本次 `none + Application Replay + full` 报告得到：v0/v1 的 SM frequency 为 `2.950/2.936 GHz`，DRAM frequency 均约 `14.987 GHz`，Duration 为 `1.684/0.706 ms`，并保留具名的两个 kernel。因此当前默认脚本继续使用 Application Replay；`--dry-run` 只裁掉 CPU golden/verify 与应用侧计时，不改变被分析的 H2D、kernel、D2H 执行链。
+
+## 5. 第一次打开 GUI：只做这六步
+
+不同 NCU 版本的按钮位置可能略有差异，但页面名称基本一致。
+
+1. 在结果列表或顶部 launch 下拉框中选择 `sgemm_v0`。
+2. 打开 `Details`，展开 `GPU Speed Of Light Throughput`。
+3. 把 v0 加为 Baseline。
+4. 切换到 `sgemm_v1`，观察相对 baseline 的变化。
+5. 依次展开 `Compute Workload Analysis`、`Scheduler Statistics`、`Warp State Statistics`、`Memory Workload Analysis`、`Occupancy`。
+6. 最后打开 `Source`，选择 CUDA-C/SASS 关联视图。
+
+不要从 Raw 页开始。Raw 有数千个计数器，适合验证具体假设，不适合作为第一次阅读的入口。
+
+## 6. 固定使用这一条分析主线
+
+每次看一个新 kernel，都按下面顺序问问题：
+
+```text
+1. Duration 是否真的变好，频率是否可比？
+2. 最忙的是 DRAM、L1/TEX、FMA，还是其他 pipeline？
+3. scheduler 是否经常找不到 eligible warp？
+4. warp 为什么不能发射？
+5. 代码执行了多少 global/shared 指令？
+6. registers/shared memory 是否限制 occupancy，是否 spill？
+7. Source/SASS 是否符合源码意图？
+8. 哪一个最小实验能验证当前推断？
+```
+
+这条主线比“看到红色就优化”可靠。NCU 的颜色和估算建议只是线索，不是最终裁决。
+
+## 7. GPU Speed Of Light：先找最忙的数据通路
+
+关键值如下：
+
+| 指标 | v0 | v1 |
 |---|---:|---:|
-| naive | 3.633 ms | 1.50 GHz |
-| v1 | 2.334 ms | 2.28 GHz |
-| v2&lt;0&gt; | 0.916 ms | 2.26 GHz |
-| v2&lt;1&gt; | 0.925 ms | 2.25 GHz |
+| Compute (SM) Throughput | 96.71% | 96.71% |
+| Memory Throughput | 96.71% | 96.71% |
+| L1/TEX Cache Throughput | 97.22% | 97.40% |
+| L2 Cache Throughput | 24.54% | 31.20% |
+| DRAM Throughput | 2.85% | 4.74% |
+| FMA pipe，elapsed cycles | 9.96% | 22.37% |
 
-naive 与 v1 的频率差异很大，所以不能用这一列精确计算版本加速比。正确做法是：
+最容易犯的错误是：
 
-- 日常 benchmark：预热后用 CUDA Event 重复执行几十到几百次，报告中位数或稳定均值。
-- NCU：解释为什么快或慢，重点看归一化利用率、指令、流量、stall 和资源。
-- v2 两版本的频率接近，报告时间可作为弱证据，但一次测量的约 1% 差距仍不足以下定论。
+> “Compute Throughput 接近 100%，所以 FP32 计算单元已经满了。”
 
-### 3.2 顶层 Compute 和 Memory 同时很高，不等于 FP32 与 DRAM 同时饱和
+这是错误的。顶层 Compute/Memory throughput 是多个子单元的汇总，常由最忙的子单元主导。本报告里真正接近满载的是 L1/TEX/LSU 路径；FMA pipeline 只有 9.96% 和 22.37%。
 
-SOL 顶层值由多个子指标汇总，常常由其中最忙的一条管线主导。本报告的 v2 同时显示约 96% 的 Compute/Memory，但：
+第二个常见错误是：
 
-- FP32/FMA pipe 只有约 21%。
-- DRAM 只有约 4%～6%。
-- L1/TEX active throughput 约 98%。
+> “Memory Throughput 接近 100%，所以 DRAM 带宽满了。”
 
-所以必须展开 breakdown。不能看到 `Compute (SM) Throughput=96%` 就直接宣布“算力瓶颈”。
+也是错误的。DRAM Throughput 只有约 2.9%～4.7%。这里的高 memory/LSU 利用率主要来自 shared memory 使用的片上数据通路，而不是显存带宽。
 
-### 3.3 Hit Rate 和 Throughput 不是同一件事
-
-- Hit Rate：请求有多少在某级 cache 命中。
-- Throughput：某条数据通路相对其峰值有多忙。
-
-shared memory 使用 L1/TEX 相关数据通路，但 shared memory 本身不是靠 cache hit/miss 工作。因此 v2 的 `L1/TEX Hit Rate≈0.1%` 不代表 shared memory 没起作用；应结合 shared load 数、L1/TEX throughput 和 MIO stall 解读。
-
-### 3.4 stall 很多不一定影响最终性能
-
-某个 warp stall 时，如果 scheduler 仍有其他 eligible warp 可发射，延迟就被隐藏了。官方指南建议：先确认 scheduler 是否经常没有 eligible warp，再追 stall 原因。
-
-## 4. 第一站：Summary 与 Speed Of Light
-
-### 4.1 Summary Page 做什么
-
-Summary 用于快速回答：
-
-- 哪些 kernel 被采集？
-- launch 配置是否一致或符合预期？
-- 哪些自动规则被 NCU 标为高优先级？
-
-自动规则是线索，不是裁判。规则不知道你的算法结构，也不知道一个修改会不会增加寄存器或破坏其他管线。
-
-### 4.2 Speed Of Light 做什么
-
-进入 **Details Page → GPU Speed Of Light Throughput**，先看：
-
-- `Compute (SM) Throughput`
-- `Memory Throughput`
-- `DRAM Throughput`
-- `L1/TEX Cache Throughput`
-- `L2 Cache Throughput`
-
-本报告的关键值：
-
-| 指标 | naive | v1 | v2&lt;1&gt; | v2&lt;0&gt; |
-|---|---:|---:|---:|---:|
-| Compute/Memory 顶层 SOL | 88.26% | 94.18% | 96.43% | 96.82% |
-| DRAM Throughput | 9.95% | 2.95% | 5.52% | 4.02% |
-| L1/TEX Throughput（active） | 97.07% | 94.83% | 97.51% | 97.79% |
-| L2 Throughput | 21.00% | 57.88% | 28.29% | 28.50% |
-
-第一层结论只能写成：
-
-> 四个 kernel 都不是 DRAM 带宽受限；最忙的内存侧资源是 L1/TEX 路径。还需要 Compute Workload、Scheduler 和 Warp State 确认它是否真的限制发射，以及流量主要来自什么指令。
-
-注意这句话保留了验证空间，没有把相关性直接写成因果关系。
-
-## 5. 第二站：Compute Workload 与 Instruction Statistics
-
-### 5.1 不要把 IPC 当作 GFLOPS
-
-IPC 统计发射/执行的所有 SASS 指令，包括：
-
-- FFMA；
-- shared/global load/store；
-- 地址计算；
-- 比较和分支；
-- barrier；
-- 循环控制。
-
-因此 IPC 高可能来自更多非计算指令。要同时看总指令数和各 pipe 利用率。
-
-| 指标 | naive | v1 | v2&lt;1&gt; | v2&lt;0&gt; |
-|---|---:|---:|---:|---:|
-| Executed IPC Active | 1.13 | 1.71 | 1.80 | 1.64 |
-| Issue Slots Busy | 25.63% | 42.56% | 44.61% | 40.67% |
-| Executed Instructions | 468.7 M | 759.6 M | 311.4 M | 282.8 M |
-| FMA pipe 利用率（elapsed） | 8.54% | 9.20% | 21.40% | 21.20% |
-
-这里能得到三个重要结论：
-
-1. v1 的 IPC 比 naive 高，但完成相同工作执行了约 62% 更多指令；高 IPC 并没有自动变成高有效算力。
-2. v2 的总指令明显减少，同时 FMA pipe 利用率提高到约 21%，说明 v2 把更多执行能力用于有效乘加。
-3. v2&lt;0&gt; 比 v2&lt;1&gt; 少约 9.2% 动态指令，但 IPC、occupancy 和 eligible warps 更低；多个效应互相抵消，最终时间接近。
-
-在 GUI 中展开 Compute Workload 的 pipeline breakdown。看到某个 pipe 很高时，再回 Source/SASS 确认是什么指令造成的。
-
-## 6. 第三站：Scheduler Statistics
-
-Scheduler 页面回答：“每个 scheduler 手里有多少 warp？有多少已经 ready？多少周期能发射？”
-
-| 指标 | naive | v1 | v2&lt;1&gt; | v2&lt;0&gt; |
-|---|---:|---:|---:|---:|
-| Active Warps / Scheduler | 11.84 | 7.80 | 11.45 | 9.58 |
-| Eligible Warps / Scheduler | 1.34 | 1.14 | 2.24 | 1.69 |
-| One or More Eligible | 28.19% | 42.85% | 45.12% | 40.92% |
-| No Eligible | 71.81% | 57.15% | 54.88% | 59.08% |
-| Issued Warp / Scheduler | 0.28 | 0.43 | 0.45 | 0.41 |
-
-理解方式：
-
-- `Active Warps` 是驻留且尚未结束的 warp，不代表现在可以发射。
-- `Eligible Warps` 是依赖和资源都满足、下一条指令可发射的 warp。
-- `No Eligible` 高，说明很多周期 scheduler 找不到可发射 warp，延迟隐藏仍不充分。
-- `Not Selected` 较高通常表示 ready warp 多于发射槽，是竞争而不是阻塞，不应首先优化。
-
-本报告里 v2&lt;1&gt; 的 eligible warp 最多、发射率最高，说明它在调度层面最好；但这不代表总时间必然最低，因为它也执行了更多循环控制等指令。
-
-## 7. 第四站：Warp State，找出不能发射的原因
-
-在 **Warp State Statistics** 中，每个数通常表示“每条已发射指令平均经历多少个该状态的 warp-cycle”。它不是时间百分比，多个状态也不能随意相加成 wall time。
-
-常见状态的可靠解释：
-
-| 状态 | 表示 warp 在等什么 | 本项目中首先检查 |
-|---|---|---|
-| `MIO Throttle` | MIO 指令队列满；shared memory、部分特殊/分支指令会使用该路径 | shared load/store 数、L1/TEX、Source 热点 |
-| `Long Scoreboard` | 等待 L1TEX scoreboard 管理的较长延迟操作，常见为 global/local/texture/surface load | global load、cache、合并访问 |
-| `Short Scoreboard` | 等待 MIO scoreboard 管理的操作，常见为 shared memory 依赖 | shared 访问、bank conflict、load 后立即使用 |
-| `Barrier` | warp 到达 CTA barrier，等待其他 warp | `__syncthreads()` 两侧负载是否均衡 |
-| `Wait` | 等待固定延迟执行依赖 | 相关 FMA 链、其他执行依赖；它不等同于 `__syncthreads()` |
-| `LG Throttle` | local/global memory 指令队列满 | global/local 指令密度、spill |
-| `Math Pipe Throttle` | 目标数学管线过度订阅 | 对应算术 pipe utilization |
-| `Not Selected` | warp 已 ready，但本周期选择了别的 warp | 通常说明 TLP 足够，不是首要坏事 |
-
-本报告每条 issued instruction 的主要 stall（只列最大的几项）：
-
-| kernel | MIO Throttle | Long Scoreboard | Barrier | Short Scoreboard | Not Selected |
-|---|---:|---:|---:|---:|---:|
-| naive | 22.39 | 6.41 | 5.59 | 0.74 | 3.71 |
-| v1 | 6.71 | 2.34 | 2.44 | 1.29 | 1.67 |
-| v2&lt;1&gt; | 11.70 | 1.01 | 3.59 | 2.48 | 3.96 |
-| v2&lt;0&gt; | 12.73 | 1.42 | 2.43 | 0.96 | 3.13 |
-
-对这几个 SGEMM，`MIO Throttle + L1/TEX 高利用率 + 大量 shared load` 三项互相印证：shared-memory/MIO 路径是当前最值得优化的方向。不能仅凭 `MIO Throttle` 名称就下结论；是代码结构和其他计数器让这个推断成立。
-
-## 8. 第五站：Memory Workload，数清楚数据指令
-
-对 SGEMM，单看 GByte/s 容易受频率和执行时间影响。更适合跨版本比较的是“完成同样工作执行了多少 load/store 指令”。
-
-| SASS 动态指令 | naive | v1 | v2&lt;1&gt; | v2&lt;0&gt; |
-|---|---:|---:|---:|---:|
-| global load | 16.78 M | 8.39 M | 8.39 M | 8.39 M |
-| global store | 0.131 M | 0.131 M | 0.131 M | 0.131 M |
-| shared load | 167.77 M | 150.99 M | 67.11 M | 67.11 M |
-| shared store | 16.78 M | 8.39 M | 8.39 M | 8.39 M |
-
-这是理解版本演进最有价值的一张表：
-
-- v1 的更大 block tile 把 global load 指令减半。
-- 但 v1 的 shared load 只比 naive 少约 10%，同时引入大量循环/地址指令，所以收益没有兑现。
-- v2 把 shared load 降到 naive 的约 40%，这是 v2 明显进步的核心证据。
-- v2 的 L1/TEX 仍接近满载，说明下一步仍应提高“每次 shared→register 读取能支持多少 FMA”的复用率。
-
-### 8.1 如何判断 shared bank conflict
-
-不要看到任意 `bank conflicts` 计数非零就立即加 padding。GUI 的 Memory Workload 表和 Source 页面中应同时检查：
-
-- shared requests 与 wavefronts；
-- excessive wavefronts / conflict ratio；
-- 哪一条 SASS `LDS/STS` 被归因；
-- 修改 padding 后实际时间和 MIO/short-scoreboard 是否改善。
-
-本报告的 `derived__memory_l1_wavefronts_shared_excessive` 为 0，因此没有证据表明 bank conflict 是当前主因。v2 的计算访问模式本身也很规整：A 对 warp 是广播，B 对 warp 是连续 bank。
-
-## 9. 第六站：Occupancy，检查 TLP 的资源上限
-
-Occupancy 是 active warps 相对硬件最大值的比例。它是隐藏延迟的手段，不是性能目标。
-
-| 指标 | naive | v1 | v2&lt;1&gt; | v2&lt;0&gt; |
-|---|---:|---:|---:|---:|
-| Registers / Thread | 40 | 55（按 56 分配） | 40 | 48 |
-| Static Shared / Block | 2 KiB | 2 KiB | 8 KiB | 8 KiB |
-| Register Block Limit | 6 | 4 | 6 | 5 |
-| Theoretical Occupancy | 100% | 66.67% | 100% | 83.33% |
-| Achieved Occupancy | 98.67% | 64.99% | 95.43% | 80.06% |
-
-GUI 中看 `Block Limit Registers/Shared Mem/Warps`，最小值是驻留 block 数的限制项：
-
-- v1 被寄存器限制到 4 blocks/SM。
-- v2&lt;0&gt; 被寄存器限制到 5 blocks/SM。
-- v2&lt;1&gt; 可以达到 6 blocks/SM。
-
-但 v2&lt;0&gt; 并没有因为 occupancy 较低就显著变慢，这正好说明“100% occupancy 不是必要条件”。只有当 eligible warp 不足、相关 stall 无法隐藏时，occupancy 下降才会转化为明确损失。
-
-可以在 `Tools → Occupancy Calculator` 中改变 block size、寄存器数和 shared memory，观察理论驻留 block/warp 如何变化。它只能计算资源上限，不能预测最终性能。
-
-## 10. 第七站：Source 与 SASS，把指标对应回代码
-
-报告由 `--import-source yes` 生成，GUI 可以显示源码；即使源码路径在另一台机器不可用，也可以查看导入的 source/SASS。
-
-建议操作：
-
-1. 选择某个 kernel，进入 **Source Page**。
-2. 在 `View` 中同时显示 CUDA-C 和 SASS。
-3. `Navigate By` 依次选择：
-   - Instructions Executed；
-   - Warp Stall Sampling (Not Issued)；
-   - Attributed Stalls；
-   - Memory 指标。
-4. 点击最热的 CUDA 行，观察对应生成了多少 `LDS`、`FFMA`、地址计算和分支。
-5. 对 v2 两版本使用 `Compare → Source Comparison`。
-
-注意“stall 归因”常指向产生 scoreboard 的 producer 指令，而不一定是后来真正等待它的 consumer 行。
-
-## 11. v2&lt;1&gt; 与 v2&lt;0&gt;：编译器是否把实验优化掉了
-
-结论：**没有编译成完全相同的代码，但手写循环顺序没有带来稳定收益。**
-
-证据如下：
-
-| | v2&lt;1&gt; | v2&lt;0&gt; |
-|---|---:|---:|
-| 动态总指令 | 311.4 M | 282.8 M |
-| 寄存器/线程 | 40 | 48 |
-| Achieved Occupancy | 95.43% | 80.06% |
-| Eligible warps/scheduler | 2.24 | 1.69 |
-| NCU 单次时间 | 925.15 µs | 916.10 µs |
-
-进一步用 `cuobjdump --dump-sass build/sgemm` 检查当前二进制：
-
-- `v2<0>` 的计算主体静态展开出 128 条 FFMA，使用更多临时寄存器；编译器对这些指令重新调度，并非机械保留源码中的四条长依赖链。
-- `v2<1>` 的主体更紧凑，静态可见约 32 条 FFMA，并保留循环执行，因此寄存器少但动态循环控制指令更多。
-- 两者数学上的 FFMA 数相同，只是静态展开、调度、寄存器生命期和循环开销不同。
-
-所以不能用源码循环顺序直接推断机器 ILP。正确实验流程是：
+因此本节结论是：
 
 ```text
-改源码循环/pragma
-  → 检查 SASS 是否真的变化
-  → 检查 registers、instruction count、occupancy
-  → 重复 benchmark 判断性能差异是否超过噪声
-  → 用 scheduler/stall 解释差异
+不是 DRAM-bound；也不是 FP32 FMA-bound；主要压力在 L1/TEX/LSU/shared-memory 路径。
 ```
 
-本实验的合理结论不是“ILP 无效”，也不是“编译器完全优化掉了”，而是：
+## 8. Compute Workload 中几个指标分别表示什么
 
-> 四个累加器已经给编译器提供了可利用的独立性；仅交换两层循环，编译器会选择不同的展开与调度策略，但当前 kernel 的主压力仍在 shared-memory/MIO 路径，因此这项局部改动没有产生显著加速。
+### 8.1 Executed IPC Active
 
-## 12. 对四个 kernel 的最终诊断
+SM 处于 active 周期时，平均每周期执行多少条指令。它排除了完全不活跃周期，适合观察活跃阶段的执行效率。
 
-### naive
+### 8.2 Executed IPC Elapsed
 
-- 优点：简单，40 registers，接近满 occupancy。
-- 主要问题：每个 thread 只有一个输出；shared load 达 167.8 M，MIO Throttle 22.39，FMA pipe 仅 8.54%。
-- 优化方向：增大 register tile，提高 shared 数据对多个输出的复用。
+以所有 elapsed cycles 为分母，包括没有活动的周期。它通常不高于 Active 版本，更接近整个 kernel 时间范围的平均执行密度。
 
-### v1
+### 8.3 Issued IPC Active
 
-- 做对了：block 输出 tile 扩大到 32×32，global load 指令减半。
-- 没兑现：shared load 仍有 151.0 M；总指令升到 759.6 M；55 registers 把 occupancy 压到约 65%。
-- 优化方向：简化索引/循环，把 register tiling 写成显式外积，减少 shared load 和控制指令。
+scheduler 在 active 周期平均发射多少条指令。Issued 与 Executed 非常接近通常是正常现象；二者差异较大时才需要进一步检查重放、取消或架构行为。
 
-### v2&lt;1&gt;
+### 8.4 Issue Slots Busy
 
-- 进步：shared load 降到 67.1 M，总指令降到 311.4 M，FMA pipe 提升到 21.4%，40 registers 保持高 occupancy。
-- 剩余瓶颈：L1/TEX 约 97.5%，MIO Throttle 11.70；4×1 thread tile 主要复用 B，A 方向仍需较多 shared 读取。
-- 优化方向：学习 2D thread/register tile，让寄存器中的 A 和 B 都被多个 FMA 复用。
+可用发射槽中实际被使用的比例。低值表示 scheduler 经常没有合适指令可发射，但它不直接告诉你原因；原因要去 Scheduler 和 Warp State 看。
 
-### v2&lt;0&gt;
+### 8.5 SM Busy
 
-- 编译器生成更激进的静态展开，动态指令更少。
-- 代价是 48 registers、较低 occupancy 和更少 eligible warps。
-- 与 v2&lt;1&gt; 性能接近，适合作为“源码、SASS、资源、性能不一一对应”的教学案例，不适合作为继续微调循环顺序的理由。
+至少有某种 SM 工作活动的周期占比。它不等于 FMA 利用率，也不等于 occupancy。
 
-## 13. 每次分析都填写的实验记录模板
+当前对比：
 
-```markdown
-### 实验名称
+| 指标 | v0 | v1 |
+|---|---:|---:|
+| Executed IPC Active | 1.14 | 1.64 |
+| Executed IPC Elapsed | 1.13 | 1.62 |
+| Issue Slots Busy | 28.34% | 40.62% |
+| SM Busy | 36.45% | 40.62% |
+| Executed Instructions | 472.91 M | 282.76 M |
 
-- 唯一改动：
-- 正确性尺寸：
-- benchmark 尺寸、预热、重复次数：
-- baseline 时间 / GFLOPS：
-- 新版本时间 / GFLOPS：
+v1 不仅 IPC 更高，而且总指令更少。二者一起出现才是强证据：相同数学工作用更少指令完成，同时 scheduler 发射得更有效。
 
-#### 预先假设
+单独看到 IPC 上升不能判定优化成功。如果新版本 IPC 更高、总指令却翻倍，最终时间仍可能更差。
 
-- 我预计哪个指标变化？为什么？
+## 9. Scheduler Statistics：active warp 多不等于能发射
 
-#### NCU 证据
+先区分三个概念：
 
-- SOL：
-- FMA / LSU / MIO pipe：
-- global/shared 指令或字节：
-- registers / occupancy：
-- eligible / no eligible：
-- top stalls：
-- SASS 是否符合源码意图：
+- `Active Warps`：已经驻留在 scheduler 上、尚未结束的 warp。
+- `Eligible Warps`：下一条指令已经就绪，本周期有资格被选择的 warp。
+- `Issued Warp`：本周期真正选中并发射的 warp。
 
-#### 结论
+当前数据：
 
-- 假设被支持还是被证伪：
-- 下一次只改变什么：
+| 指标（每 scheduler） | v0 | v1 |
+|---|---:|---:|
+| Active Warps | 11.84 | 9.62 |
+| Eligible Warps | 1.30 | 1.70 |
+| Issued Warp / cycle | 0.28 | 0.41 |
+| One or More Eligible | 28.50% | 40.92% |
+| No Eligible | 71.50% | 59.08% |
+
+v0 几乎拥有最大数量的 active warps，却有 71.50% 的周期找不到 eligible warp。这证明“线程很多、occupancy 很高”仍不能保证填满流水线；这些 warp 可能一起被 shared-memory 队列、scoreboard 或 barrier 卡住。
+
+v1 的 active warps 较少，但 eligible warps 更多，实际发射率更高。这是 ILP、较低指令压力与较少等待共同作用的结果。
+
+## 10. Warp State：为什么 warp 没有 eligible
+
+这里的数值表示平均每发射一条指令，对应多少个 warp cycle 处于某种状态。不要把它直接读成时间百分比。
+
+| stall reason | v0 | v1 | 入门解释 |
+|---|---:|---:|---|
+| MIO Throttle | 21.94 | 12.37 | MIO 指令队列满；shared-memory 指令常走这条路径 |
+| Long Scoreboard | 6.46 | 1.80 | 等待较长延迟的数据依赖，常与 global/local memory 有关 |
+| Barrier | 5.43 | 2.60 | warp 到达同步点后等待其他 warp |
+| Not Selected | 3.51 | 3.16 | 已 eligible，但本周期选了别的 warp；不一定是坏事 |
+| Wait | 1.99 | 0.96 | 等待固定延迟的执行依赖 |
+| Short Scoreboard | 0.81 | 0.96 | 等待较短延迟的 MIO/shared 等依赖 |
+
+`Warp Cycles Per Issued Instruction` 从 v0 的 41.54 降到 v1 的 23.50。也就是说，v1 发射两条相邻指令之间的平均等待显著缩短。
+
+不能只凭 `MIO Throttle` 这个名字就断定 shared memory 是根因。这里还有两组交叉证据：
+
+- L1/TEX active throughput 接近 98%；
+- shared-load 指令数远高于 global-load 指令数。
+
+三项互相印证后，“shared-memory/MIO 压力”才是可靠推断。
+
+## 11. Memory Workload：比较完成同样工作用了多少指令
+
+对于这两个 kernel，跨版本最直观的是动态 SASS 指令数：
+
+| SASS 指令 | v0 | v1 | v1/v0 |
+|---|---:|---:|---:|
+| global load | 16.78 M | 8.39 M | 50% |
+| global store | 0.131 M | 0.131 M | 100% |
+| shared load | 167.77 M | 67.11 M | 40% |
+| shared store | 16.78 M | 8.39 M | 50% |
+| 全部 executed instructions | 472.91 M | 282.76 M | 59.8% |
+
+这张表揭示了 v1 的核心优化：
+
+1. 每线程处理 4 个输出，总线程数降为四分之一。
+2. 一个加载到 shared/register 的值支持更多 FMA。
+3. cooperative load、地址计算、循环控制和 shared 指令都随之减少。
+4. 输出元素数量不变，所以 global store 指令数不变。
+
+`L1/TEX Hit Rate` 对 shared memory 不是“是否命中缓存”的总评分。shared memory 使用 L1/TEX 相关硬件通路，但不按普通 L1 cache hit/miss 的方式理解。不要因为 v1 的 hit rate 约 0.1% 就说 shared memory 没生效。
+
+### 11.1 v1 的 shared-store bank conflict 是一个次级实验点
+
+NCU 规则报告：v1 的 8,388,608 次 shared-store 请求产生约 1,382,161 个 bank conflict，约占 9,785,076 个 shared-store wavefront 的 14.13%，平均每个请求约产生 1.17 个 wavefront（约 1.2-way conflict）。
+
+这是值得验证的线索，但不要立即把所有 shared 数组都改成 `TILE_SIZE+1`：源码看上去是按行连续写，编译器又进行了展开和 SASS 重排。正确做法是：
+
+1. 在 Source 页定位 `STS` 和相关 source line。
+2. 重复采样，确认 conflict 数稳定存在。
+3. 分别只改变 tileA 或 tileB 的 layout/padding。
+4. 每次同时看 conflict、MIO Throttle、registers 和真实时间。
+5. 只有时间稳定下降才保留修改。
+
+NCU 给出的“Estimated Speedup”是局部上限估算，不是承诺。
+
+## 12. Occupancy：v1 为什么更低却更快
+
+| 指标 | v0 | v1 |
+|---|---:|---:|
+| registers/thread | 40 | 48 |
+| static shared/block | 2.05 KB | 8.19 KB |
+| theoretical occupancy | 100% | 83.33% |
+| achieved occupancy | 98.67% | 80.08% |
+| active warps/SM | 47.36 | 38.44 |
+| local spilling | 0 | 0 |
+
+v1 用更多寄存器保存四个累加结果，用更大的 shared tile 提高复用，因此 occupancy 下降。这是合理的资源交换。
+
+判断这种交换是否成功，要看：
+
+- 是否出现 local spill：当前为 0；
+- eligible warp 和 issue rate 是否恶化：实际上改善；
+- 最终时间是否下降：约快 2.4 倍。
+
+所以“把 occupancy 拉回 100%”不是当前优化目标。Occupancy 是隐藏延迟的一种手段，不是最终成绩。
+
+## 13. Source 页：连接 CUDA、SASS 与指标
+
+打开 v1 的 `Source` 页，选择 CUDA-C/SASS 关联视图。先只识别以下指令：
+
+| SASS | 含义 |
+|---|---|
+| `FFMA` | FP32 fused multiply-add |
+| `LDS` / `LDS.128` | 从 shared memory 读取标量/更宽数据 |
+| `STS` | 写 shared memory |
+| `LDG` / `STG` | global load/store |
+| `BAR` | block 同步 |
+| `BRA` | 分支/循环控制 |
+
+当前 v1 的 compute 主体可以看到大量交错的 `LDS`、`LDS.128` 与 `FFMA`。这说明编译器没有机械地逐行执行 CUDA 源码，而是展开并重新调度了循环，在多个独立累加结果之间寻找 ILP。
+
+建议完成三个练习：
+
+1. 找到 v0 内层循环对应的 `LDS + FFMA`。
+2. 找到 v1 四个累加器对应的交错 `FFMA`。
+3. 对照 Launch Statistics 的 40/48 registers，思考更多展开为什么需要更多寄存器。
+
+源码提供“可能的独立性”，最终机器是否利用它必须看 SASS 和性能计数器。
+
+## 14. PM Sampling 中的 PM 是什么
+
+PM 是 Performance Monitor。PM Sampling 按固定间隔对硬件 performance-monitor counter 采样，用来观察 kernel 执行期间指标随时间的变化，而不是只得到整个 kernel 的一个汇总值。
+
+Details 中 PM Sampling 的几列主要是采样配置：
+
+- `Maximum Buffer Size`：设备侧采样缓冲区上限；
+- `Maximum Sampling Interval`：最大采样间隔，本报告约 3 μs；
+- `# Pass Groups`：这些 sampling metric 被分成多少组采集。
+
+这些值本身不是瓶颈。真正有用的是 GUI 中的时间轴：例如观察 SM frequency、FMA、L1/TEX 是否在 kernel 前后发生阶段性变化。
+
+对于约 1～4 ms 的 kernel，PM Sampling 能提供不少样本，但它仍是采样而非逐周期真值。第一次分析时先看汇总 sections；需要回答“瓶颈是否只发生在某个阶段”时再看 PM 时间轴。
+
+## 15. 把证据整理成一页结论
+
+| 版本 | 已解决什么 | 证据 | 仍有什么问题 |
+|---|---|---|---|
+| v0 | 正确的 shared-memory tiling 基线 | correctness PASS，DRAM 仅 2.85% | 每线程只算 1 个输出；shared load 167.8 M；MIO Throttle 21.94；FMA 9.96% |
+| v1 | 4×1 thread tile，提高复用并减少线程/指令 | shared load 67.1 M；总指令少 40.2%；issue 0.41；约快 2.39× | L1/TEX 97.40%；MIO 12.37；FMA 仅 22.37%；存在 shared-store conflict 线索 |
+
+因此下一版的首要假设应是：
+
+> 在 M、N 两个方向做二维 register tiling，让每次 shared load 支持更多 FMA，进一步降低 shared/MIO 指令压力。
+
+## 16. 一次 45 分钟的 GUI 实践
+
+不要边读边漫无目的点页面。按下面顺序做一次：
+
+1. 记录 v0/v1 的 Duration、SM/DRAM Frequency。
+2. 记录 L1/TEX、DRAM、FMA pipeline。
+3. 记录 Executed Instructions、IPC、Issue Slots Busy。
+4. 记录 active/eligible/issued warps。
+5. 记录前五个 stall reason。
+6. 记录 global/shared load/store 指令。
+7. 记录 registers、shared/block、occupancy、spill。
+8. 在 Source 页各找一处 `LDG`、`LDS`、`STS`、`FFMA`、`BAR`。
+9. 用三句话写出“证据 → 推断 → 下一实验”。
+
+如果能不看本文重新解释“为什么 v0 occupancy 更高却更慢”，你已经掌握了这份报告最重要的部分。
+
+## 17. 命令行复核
+
+GUI 用于交互学习，CLI 便于复制关键表格：
+
+```bash
+ncu --import ncu-rep/sgemm.v0v1.0719.ncu-rep \
+    --page details \
+    --print-summary per-kernel
 ```
 
-## 14. 附录：推荐资料
+查看 v1 的 CUDA/SASS 关联：
+
+```bash
+ncu --import ncu-rep/sgemm.v0v1.0719.ncu-rep \
+    --page source \
+    --print-source cuda,sass \
+    --kernel-name regex:sgemm_v1
+```
+
+Raw CSV 是“列式宽表”，通常应由脚本提取所需 metric，不建议手工阅读整个输出。
+
+## 18. 参考资料
 
 ### 简体中文优先
 
-1. [NVIDIA Nsight Compute 中文产品页](https://developer.nvidia.cn/nsight-compute)：先建立工具能回答什么问题的整体认识。
-2. [NVIDIA CUDA 编程手册系列：CUDA 编程模型接口](https://developer.nvidia.cn/blog/cuda-programming-model-interface-cn/)：包含 tiled 矩阵乘和 shared memory 复用。
-3. [在 CUDA C/C++ 中使用共享内存](https://developer.nvidia.cn/blog/using-shared-memory-cuda-cc/)：shared memory、同步和合并访问入门。
-4. [NVIDIA 加速计算学习路径](https://www.nvidia.cn/training/learning-path/accelerated-computing/)：有中文 CUDA C++ 基础课程，也列出了 Nsight 分析课程。
-5. [CUDA C++ Programming Guide PDF（NVIDIA 中国镜像）](https://docs.nvidia.cn/cuda/pdf/CUDA_C_Programming_Guide.pdf) 与 [Best Practices Guide PDF](https://docs.nvidia.cn/cuda/pdf/CUDA_C_Best_Practices_Guide.pdf)：镜像页面主体仍以英文为主，但属于最可靠的参考手册。
+1. [NVIDIA Nsight Compute 产品与入门页](https://developer.nvidia.cn/nsight-compute)
+2. [CUDA 编程模型接口：shared-memory tiled matmul](https://developer.nvidia.cn/blog/cuda-programming-model-interface-cn/)
+3. [在 CUDA C/C++ 中使用共享内存](https://developer.nvidia.cn/blog/using-shared-memory-cuda-cc/)
+4. [NVIDIA 加速计算学习路径](https://www.nvidia.cn/training/learning-path/accelerated-computing/)
 
 ### 英文官方资料
 
-1. [Nsight Compute UI User Guide](https://docs.nvidia.com/nsight-compute/2025.3/NsightCompute/index.html)：GUI 页面、Baseline、Source Comparison 的权威说明。
-2. [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/2025.3/ProfilingGuide/index.html)：SOL、Scheduler、Warp State 和每种 stall 的定义。
-3. [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)：profiling、coalescing、occupancy、shared memory 和 async copy。
-4. [CUTLASS: Fast Linear Algebra in CUDA C++](https://developer.nvidia.com/blog/cutlass-linear-algebra-cuda/)：理解生产级 GEMM 的 block/warp/thread 分层 tiling 与 double buffering。
-
-阅读文档时，以当前 CUDA/Nsight 版本的官方定义为准。论坛和博客适合建立直觉，但不能替代指标定义。
-
-### 不打开 GUI 时如何复核报告
-
-GUI 是主要学习工具，但下面两条命令适合确认数值或保存实验记录：
-
-```bash
-# 按 kernel 打印各 section 的摘要
-ncu --import report/sgemm_nv1v2_2.ncu-rep \
-    --page details \
-    --print-summary per-kernel
-
-# 导出报告中采集的原始 metrics；列数很多，通常再用脚本筛选
-ncu --import report/sgemm_nv1v2_2.ncu-rep \
-    --page raw \
-    --csv \
-    --print-units base
-```
-
-CLI 导出和 GUI 读取的是同一份 `.ncu-rep`，很适合把关键指标纳入版本化的实验表格；不要为了方便而只截 GUI 图片、丢失 kernel 名称和测量条件。
+1. [Nsight Compute Profiling Guide](https://docs.nvidia.com/nsight-compute/ProfilingGuide/index.html)：replay、clock control、metrics 与 reproducibility。
+2. [Nsight Compute GUI User Guide](https://docs.nvidia.com/nsight-compute/NsightCompute/index.html)：各页面、baseline、source correlation。
+3. [Nsight Compute CLI Guide](https://docs.nvidia.com/nsight-compute/NsightComputeCli/index.html)：`--replay-mode`、`--clock-control`、import 与过滤。
+4. [CUDA C++ Best Practices Guide](https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/)：coalescing、shared memory、occupancy 与 benchmark 方法。
+5. [CUDA C++ Programming Guide](https://docs.nvidia.com/cuda/cuda-c-programming-guide/)：warp scheduling、memory hierarchy 与执行模型。

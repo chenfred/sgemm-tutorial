@@ -8,6 +8,12 @@ project(sgemm_tutorial LANGUAGES CXX CUDA)
 # 提供 CUDA::cudart 等 imported target。main.cpp 通过 common_utils.h 使用 CUDA runtime API，
 # 因此需要 cudart 的头文件路径和链接参数。
 find_package(CUDAToolkit REQUIRED)
+find_package(OpenMP REQUIRED COMPONENTS CXX)
+
+# 单配置生成器未显式选择构建类型时默认使用 Release，避免 CPU golden 停留在 -O0。
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+    set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
+endif()
 
 # 让 .cpp 和 .cu 都按 C++17 方言编译；这里不是必须的，只是固定一个明确的语言标准。
 set(CMAKE_CXX_STANDARD 17)
@@ -30,7 +36,7 @@ file(GLOB SGEMM_SOURCES CONFIGURE_DEPENDS
 add_executable(sgemm ${SGEMM_SOURCES})
 
 target_include_directories(sgemm PRIVATE include)
-target_link_libraries(sgemm PRIVATE CUDA::cudart)
+target_link_libraries(sgemm PRIVATE CUDA::cudart OpenMP::OpenMP_CXX)
 
 # 为 Nsight Compute 源码/SASS 对应关系保留行号信息，以及完整调试符号信息，只传给 CUDA 编译单元。
 target_compile_options(sgemm PRIVATE

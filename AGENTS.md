@@ -4,13 +4,16 @@
 
 本仓库用于练习 CUDA 单精度矩阵乘法（SGEMM）算子实现。
 
-- `src/main.cpp`：主程序、输入数据初始化、GPU kernel 调用、CPU 参考结果校验与性能输出。
-- `src/sgemm_naive.cu`：naive SGEMM kernel 实现。
-- `src/sgemm_v1.cu`：SGEMM 优化版本实现。
+- `src/main.cpp`：主程序、输入数据初始化、GPU kernel 调用、正确性校验编排与性能输出。
+- `src/verify.cpp`：OpenMP 多线程 CPU golden 计算与混合容差校验。
+- `src/warmup.cu`：正式 kernel 前的 GPU warmup；配合 Application Replay 覆盖每个 NCU 采集 pass。
+- `src/sgemm_v0.cu`：16×16 shared-memory tiling 基线版本。
+- `src/sgemm_v1.cu`：32×32 shared-memory tiling、每线程计算 4 个输出的优化版本。
 - `include/common_utils.h`：通用 CUDA 检查宏、计时器和辅助函数。
 - `include/sgemm_func.h`：SGEMM kernel host 侧调用声明。
+- `include/sgemm_verify.h`：CPU golden/verify 声明与 FP32 默认容差。
 - `scripts/build.sh`：CMake 编译脚本，支持 `--clean` 和 `--run`。
-- `scripts/profile.sh`：Nsight Compute profiling 脚本，报告输出到 `report/`。
+- `scripts/profile.sh`：Nsight Compute profiling 脚本，报告输出到 `ncu-rep/`。
 - `CMakeLists.txt`：CMake 构建入口，自动收集 `src/*.cpp` 与 `src/*.cu`。
 - `.clangd`：clangd 配置，使用 `build/compile_commands.json` 并过滤 nvcc 专用参数。
 - `README.md`：项目目标说明。
@@ -41,23 +44,24 @@ scripts/build.sh --run
 
 - `scripts/build.sh`：配置并增量编译，产物位于 `build/sgemm`。
 - `scripts/build.sh --clean`：删除 `build/` 后从 0 配置和编译。
-- `scripts/build.sh --run`：编译成功后运行默认 SGEMM 测试。
-- `scripts/profile.sh -o <name>`：使用 Nsight Compute 生成 `report/<name>.ncu-rep`。
+- `scripts/build.sh --run [PROGRAM_ARG...]`：编译成功后运行 SGEMM，并把后续参数传给程序。
+- `scripts/profile.sh -o <name>`：使用 Nsight Compute 生成 `ncu-rep/<name>.ncu-rep`。
 
 ## 编码风格与命名约定
 
 - 使用 C++/CUDA，保持现有简洁风格。
 - 缩进使用 4 个空格，不使用 tab。
-- CUDA kernel 使用小写加下划线命名，例如 `sgemm_naive`。
-- host 侧封装函数使用描述性名称，例如 `sgemm_naive_do`。
+- `for`、`if` 等控制流即使只有单条语句也必须使用花括号。
+- CUDA kernel 使用小写加下划线命名，例如 `sgemm_v0`。
+- host 侧封装函数使用描述性名称，例如 `sgemm_v0_do`。
 - 宏使用全大写，例如 `CUDA_CHECK`。
-- 常量使用 `constexpr`，名称可沿用现有全大写风格，例如 naive 版的 `TILE_SIZE`、v1 版的 `TILE_LEN` / `BM` / `BN` / `KS`。
+- 常量使用 `constexpr`，名称沿用现有全大写风格，例如 `TILE_SIZE`、`BLOCK_SIZE_X`、`OUTPUTS_PER_THREAD`。
 
 修改 kernel 时优先保证边界条件正确，再考虑性能优化。
 
 ## 测试指南
 
-当前测试逻辑内置在 `src/main.cpp` 中：GPU 输出会与 CPU 三重循环参考实现比较，绝对误差 `< 1e-3` 判 PASS。默认跑两组尺寸：`1024×4096×1024`（可被 tile 整除）与 `1000×2000×1500`（非方阵 M≠N≠K 且不能被 tile 整除，用于检验边界）。
+当前测试由 `src/main.cpp` 编排，CPU 参考计算与校验位于 `src/verify.cpp`。GPU 输出按 `|out-golden| <= atol + rtol*|golden|` 比较，FP32 默认 `rtol=1.3e-6`、`atol=1e-5`。为简化 v0/v1 的 NCU 报告，当前默认只跑 `1024×4096×1024`。
 
 开发时建议至少运行：
 

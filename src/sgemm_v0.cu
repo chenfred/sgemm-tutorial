@@ -4,7 +4,7 @@
 static constexpr uint32_t TILE_SIZE = 16;
 
 // 标准 SGEMM 语义：C(M,N) = A(M,K) * B(K,N)，K 为收缩维度。
-static __global__ void sgemm_naive(const float* A, const float* B, float* C, int M, int N, int K) {
+static __global__ void sgemm_v0(const float* A, const float* B, float* C, int M, int N, int K) {
     __shared__ float tileA[TILE_SIZE][TILE_SIZE];
     __shared__ float tileB[TILE_SIZE][TILE_SIZE];
 
@@ -32,9 +32,9 @@ static __global__ void sgemm_naive(const float* A, const float* B, float* C, int
     }
 }
 
-void sgemm_naive_do(const float* A, const float* B, float* C, int M, int N, int K) {
+void sgemm_v0_do(const float* A, const float* B, float* C, int M, int N, int K) {
     dim3 blockDim{TILE_SIZE, TILE_SIZE};
     dim3 gridDim{CeilDiv<uint32_t>(N, blockDim.x), CeilDiv<uint32_t>(M, blockDim.y)};
 
-    sgemm_naive<<<gridDim, blockDim, 0, nullptr>>>(A, B, C, M, N, K);
+    sgemm_v0<<<gridDim, blockDim, 0, nullptr>>>(A, B, C, M, N, K);
 }

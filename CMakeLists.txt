@@ -1,13 +1,15 @@
 cmake_minimum_required(VERSION 3.18)
 
-# 这个CMake管理的编译流程大致等价于：nvcc -std=c++17 -Iinclude src/*.cpp src/*.cu -o build/sgemm
+# CMake 分别编译 host C++ 与 CUDA 源文件，再把 CUDA Runtime 和 OpenMP 链接进同一个可执行文件。
+# 这不再等价于一条简单的 nvcc 命令：verify.cpp 由 host 编译器开启 OpenMP，.cu 文件则由 nvcc 为 sm_120 编译。
 
 # 启用 CXX 和 CUDA 两种语言：.cpp 由 C++ 编译器处理，.cu 由 CUDA 编译器处理。
 project(sgemm_tutorial LANGUAGES CXX CUDA)
 
-# 提供 CUDA::cudart 等 imported target。main.cpp 通过 common_utils.h 使用 CUDA runtime API，
-# 因此需要 cudart 的头文件路径和链接参数。
+# 提供 CUDA Runtime 的头文件、库和 CUDA::cudart imported target。
 find_package(CUDAToolkit REQUIRED)
+
+# sgemm_golden/sgemm_verify 使用 OpenMP 并行 CPU 计算和校验；只要求 CXX 组件。
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 
 # 单配置生成器未显式选择构建类型时默认使用 Release，避免 CPU golden 停留在 -O0。
@@ -15,7 +17,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
     set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 endif()
 
-# 让 .cpp 和 .cu 都按 C++17 方言编译；这里不是必须的，只是固定一个明确的语言标准。
+# 让 host C++ 和 CUDA 源文件都使用明确的 C++17 方言。
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CUDA_STANDARD 17)
@@ -36,6 +38,8 @@ file(GLOB SGEMM_SOURCES CONFIGURE_DEPENDS
 add_executable(sgemm ${SGEMM_SOURCES})
 
 target_include_directories(sgemm PRIVATE include)
+
+# cudart 提供 CUDA Runtime/Profiler API；OpenMP::OpenMP_CXX 为 verify.cpp 提供编译和链接选项。
 target_link_libraries(sgemm PRIVATE CUDA::cudart OpenMP::OpenMP_CXX)
 
 # 为 Nsight Compute 源码/SASS 对应关系保留行号信息，以及完整调试符号信息，只传给 CUDA 编译单元。

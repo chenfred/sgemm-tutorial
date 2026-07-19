@@ -14,6 +14,7 @@
 - `include/sgemm_verify.h`：CPU golden/verify 声明与 FP32 默认容差。
 - `scripts/build.sh`：CMake 编译脚本，支持 `--clean` 和 `--run`。
 - `scripts/profile.sh`：Nsight Compute profiling 脚本，报告输出到 `ncu-rep/`。
+- `.agents/`：agent 协作资料；`memories/` 保存经过裁剪的项目状态、决策和经验教训。
 - `CMakeLists.txt`：CMake 构建入口，自动收集 `src/*.cpp` 与 `src/*.cu`。
 - `.clangd`：clangd 配置，使用 `build/compile_commands.json` 并过滤 nvcc 专用参数。
 - `README.md`：项目目标说明。
@@ -94,6 +95,9 @@ PR 应包含：
 
 - 优先阅读现有代码风格后再修改。
 - 不要重置或覆盖用户未提交的改动。
+- 除 Codex 自动发现所需的根目录 `AGENTS.md` 外，agent 协作产生的记忆、计划、交接、分析和临时资料统一放在 `.agents/` 下；面向项目使用者的正式文档仍放在 `docs/`。
+- 项目长期记忆统一维护在 `.agents/memories/`。以下时机必须更新：用户明确验收一轮任务后、触发上下文压缩前，以及发现重要状态变化、关键结论或可复用失败经验时。
+- 更新记忆时优先修订已有主题文件，不追加流水账；删除或压缩过时、重复、低价值内容，明确区分“当前事实”和“历史实验”，保持目录整洁且信息密度高。
 - 对 CUDA kernel 的修改必须按「SGEMM 语义约定」核对 `M`、`N`、`K` 三个维度的边界与索引含义。
 - 若修改构建系统，保持 `scripts/build.sh` 可用，并同步更新本文档。
 - `scripts/*.sh` 应能从任意当前目录执行；新增脚本时参考现有脚本的 `SCRIPT_DIR` / `PROJECT_ROOT` 写法。

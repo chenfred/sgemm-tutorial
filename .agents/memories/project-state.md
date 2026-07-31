@@ -1,15 +1,17 @@
 # 当前项目状态
 
-更新时间：2026-07-19。
+更新时间：2026-07-31。
 
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- `src/main.cpp` 的当前教学基线只注册 `sgemm_v0` 与 `sgemm_v1`；历史试验源码
+- v0/v1 的稳定 profiling 基线仍只使用 `sgemm_v0` 与 `sgemm_v1`；历史试验源码
   `sgemm_trial_v1_1.cu`、`sgemm_trial_v1_2.cu` 及其 host 声明保留在工程中，但有意不注册到
   `IMPLEMENTATIONS`，避免干扰日常运行和 NCU 报告。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
+- `sgemm_trial_v2_1` 已提交：block 为 32×8、K tile 为 32，`REG_TILE_X/Y` 控制二维 thread tile，默认 4×4。B cooperative load 已与 `REG_TILE_Y` 解耦，X/Y 的 1..4 组合全部通过快速完整输出校验；当前计算顺序仍是 `ri -> rj -> t`。
+- 当前工作区已准备未提交的 `sgemm_trial_v2_2` 副本、host 声明和临时 `IMPLEMENTATIONS` 注册；它尚未与 v2_1 形成计算逻辑差异，计划只把计算部分改为 `t -> regA/regB -> ri/rj` 外积结构。
 - `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
   输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
   accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`
@@ -44,4 +46,5 @@
 - `draft.md` 是用户维护的任务草稿；发现未提交修改时不得覆盖或清理。
 - `build/`、`ncu-rep/` 是本地产物。不要把二进制报告当作可提交的项目记忆。
 - 仓库级指引继续使用根目录 `AGENTS.md`，以符合 Codex 默认发现规则；不要移动到 `.agents/AGENTS.md`。除此入口外，agent 记忆、计划、交接和内部分析统一放在 `.agents/`。
+- 用户主要在 VS Code 终端或 Windows Terminal 中阅读 Codex 输出；交互与面向终端的说明默认使用纯文本公式，不使用 LaTeX/MathJax，具体约束见根目录 `AGENTS.md`。
 - `.claude/` 与 `CLAUDE.md` 已在提交 `07bdb05` 中清理并由用户验收，后续不要重新创建 Claude 专用配置或重复文档。

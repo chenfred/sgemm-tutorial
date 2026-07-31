@@ -26,6 +26,15 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 - TLP 用其他 warp 隐藏当前 warp 的等待；ILP 用同一 warp 内不同累加链的独立指令隐藏依赖。若共享硬件队列已拥堵，继续增加 TLP 只会增加排队；更有效的是让每次 load 支持更多 FMA。
 - Register tiling 不只是“取消连续指令依赖”。它的第一性收益是寄存器数据复用和降低 load/地址指令密度，ILP 是由多个独立累加器自然产生的附加收益。
 
+## v2_1 当前实验结论（2026-07-31）
+
+- `sgemm_trial_v2_1` 固定 `blockDim=32x8`、`TILE_K=32`，用 `REG_TILE_X/Y` 定义每线程二维输出，默认 `4x4`。
+- B cooperative load 曾错误依赖 `REG_TILE_Y`：Y 小于 4 时不能完整初始化 32 行 B tile。现在使用独立的 `B_TILE_ROWS_PER_THREAD=TILE_K/TILEBASE_Y=4`，X/Y 的 `1..4` 组合均通过完整输出校验。
+- 快速 benchmark 对 `1..4 x 1..4` 做了 20 次 warmup、5 批各 100 launches 的筛选；当前循环结构下 `4x4` 最快，约 17.51 TFLOPS，是 `1x1` 的 3.69 倍。该数据未锁频且不是 NCU 结果，只作为趋势证据。
+- Y 的收益显著高于 X：基础 C tile 为 `8x32`，固定 X 时增大 Y 不增加每 block 的 B tile，却让它服务更多输出行并减少纵向 blocks 重复发出的 B global loads。
+- v2_1 的计算顺序仍为 `ri -> rj -> t`。它实现了 block 级 global-to-shared 复用，但没有在源码上显式实现 `t -> regA/regB -> ri/rj` 的 shared-to-register 外积复用；因此 4x4 不是最终结论。
+- 下一实验 `sgemm_trial_v2_2` 只改变计算循环为 t 外层的小型外积，固定其余布局与参数，再用正确性、多次 benchmark、NCU 的 LDS/FFMA、MIO Throttle、registers、occupancy 和 spill 建立证据链。
+
 ## 历史失败实验及保留价值
 
 - 旧 agent 文档分析的是已经删除的早期 v1：当时约 55 registers/thread、7.60e8 executed instructions、occupancy 约 65%，比旧 naive 慢。那些数值不适用于当前 v1；保留的教训是：复杂线程重排和索引可能让非 FMA 指令暴涨，静态上“复用更高”不等于最终更快。
@@ -38,6 +47,6 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 2. 主线优先二维 register tiling，例如每线程 4×4 输出，用 `TM+TN` 个 shared 标量支持 `TM×TN` 个 FMA；目标是继续降低 shared load/FMA 和 MIO Throttle。
 3. v2 正确后再做少量 BM/BN/BK/TM/TN 单变量实验，并始终检查 spill、registers、occupancy 和真实时间。
 4. 再优化 cooperative/vectorized global load；只有 Long Scoreboard、Barrier 或 load/compute 气泡成为突出问题后，才进入 double buffering/async copy。
-5. v1 的 shared-store bank conflict 约 1.2-way 是次级实验点。padding/layout 只能作为单变量实验，冲突下降但时间不降就不保留。
+5. v1 的 Details 硬件计数虽提示 shared store 约 1.2-way conflict，但 Source/SASS 中三处 shared 访问均为 `Wavefronts Shared = Ideal`、`Excessive = 0`，手工地址映射也确认 store 连续、A load 广播、B load 连续。该计数更可能包含不可归因的 L1TEX 仲裁，不应再把 padding/layout 当作 v2 前实验或主要优化方向。
 
 面向学习者的完整说明以 `docs/ncu-gui-sgemm-analysis.md` 和 `docs/v1-to-v2-learning-roadmap.md` 为准；本文件只保存跨会话决策与易丢失经验。

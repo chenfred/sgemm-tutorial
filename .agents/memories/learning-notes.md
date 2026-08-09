@@ -1,5 +1,11 @@
 # SGEMM 学习与性能结论
 
+## 当前学习策略
+
+- 默认先广度、后深度：优先实践典型 CUDA kernel 语法、优化套路和可复用能力；正确性、核心机制和基本性能证据成立后即进入下一主题。
+- 参数解耦/穷举、极限微调和逐条 SASS 考古先记录后延；仅在正确性、spill、下一主题受阻或结果严重违背预期时提前深挖。
+- 当前 `BX=32,BY=8,BK=32` 与 `TM=12,TN=3` 已足以完成二维 register tiling 学习，不继续搜索 `BX/BY/BK/TM/TN`；待典型优化模式大致实践一遍后再回到系统调参与自动搜索。
+
 ## 当前 v0/v1 的证据
 
 数据来自 `ncu-rep/sgemm.v0v1.0719.ncu-rep`，尺寸为 1024×4096×1024：
@@ -34,6 +40,15 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 - Y 的收益显著高于 X：基础 C tile 为 `8x32`，固定 X 时增大 Y 不增加每 block 的 B tile，却让它服务更多输出行并减少纵向 blocks 重复发出的 B global loads。
 - v2_1 的计算顺序仍为 `ri -> rj -> t`。它实现了 block 级 global-to-shared 复用，但没有在源码上显式实现 `t -> regA/regB -> ri/rj` 的 shared-to-register 外积复用；因此 4x4 不是最终结论。
 - 下一实验 `sgemm_trial_v2_2` 只改变计算循环为 t 外层的小型外积，固定其余布局与参数，再用正确性、多次 benchmark、NCU 的 LDS/FFMA、MIO Throttle、registers、occupancy 和 spill 建立证据链。
+
+## v2_2 Outer Product 与 tile 扫描（2026-08-09）
+
+- 正式版 `sgemm_v2` 已从 v2_2 收敛：固定 `BX=32,BY=8,BK=32,TM=12,TN=3`，形成 256-thread、96×96 block tile。`BK` 在概念和加载代码上已与 `BX` 解耦，但用 `BK % BX == 0`、`BK % BY == 0` 保持 cooperative load 规整；不继续做参数搜索。
+- v2_2 已显式实现 `k -> regA/regB -> ri/rj` outer product。固定 `4x4` 时，多轮交错 benchmark 得到 v2_1 约 `0.516 ms`、v2_2 约 `0.520 ms`，差异在约 1% 内；ptxas 分别使用 56/48 registers，无 spill。这说明 v2_1 的源码循环顺序已被编译器优化成效果接近的机器指令，显式换序本身没有形成新性能收益。
+- 在 `M=1024,N=4096,K=1024`、随机输入、30 次 warmup、9 批各 100 launches 的快速扫描中，v2_2 的代表结果为：`1x4=0.762 ms`、`2x4=0.615 ms`、`4x4=0.528 ms`、`2x8=0.436 ms`、`3x8=0.485 ms`、`3x12=0.369 ms`、`4x16=0.557 ms`。各配置抽样校验 PASS，当前 `3x12` 的重复结果稳定在 `0.360～0.362 ms`，约 23.8 TFLOPS，相对同进程 v2_1 快约 1.43 倍。
+- `REG_TILE_Y=4*REG_TILE_X` 同时让 block C tile 成为正方形，并在理想模型中平衡 A/B 的 global-to-shared 重复加载：`A loads/output` 约为 `1/X`，`B loads/output` 约为 `4/Y`。在编译器用 `LDS.128` 搬 A、标量 LDS 搬 B 的当前代码生成下，它也近似平衡两侧 shared-load SASS 数量。
+- `3x12` 是复用和资源代价的当前拐点：36 accumulators/thread、96 registers/thread、24 KiB static shared、无 spill。继续到 `4x16` 虽进一步降低理想 load/FMA，但增加到 64 accumulators、128 registers、32 KiB shared，且 grid 仅 256 blocks，低并行度、尾波、长 live range 和更大的展开代码抵消收益。
+- 以上是未锁频、输入驻留后反复 launch 的快速 benchmark；使用同进程 v2_1 交错计时和多轮重复控制频率漂移，适合作为当前尺寸的参数选择，但正式跨版本结论仍应由简化 NCU 指标验证。
 
 ## 历史失败实验及保留价值
 

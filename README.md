@@ -13,6 +13,7 @@ src/verify.cpp        多线程 CPU golden 计算与正确性校验
 src/warmup.cu         NCU/计时前使用的独立 GPU warmup kernel
 src/sgemm_v0.cu       16×16 shared-memory tiling 基线版本
 src/sgemm_v1.cu       32×32 shared-memory tiling + 每线程 4 个输出
+src/sgemm_v2.cu       96×96 block tile + 每线程 12×3 register tile
 scripts/build.sh      CMake 编译脚本
 scripts/profile.sh    Nsight Compute profiling 脚本
 CMakeLists.txt        CMake 构建配置
@@ -56,7 +57,7 @@ build/sgemm
 ./build/sgemm
 ```
 
-程序会对 `1024×4096×1024` 运行 v0/v1。每个正式 kernel 前都会运行一次独立的长 warmup，再输出正式调用的耗时、GFLOPS 和 `PASS` / `FAIL` 校验结果。
+程序会对 `1024×4096×1024` 运行 v1/v2。每个正式 kernel 前都会运行一次独立的长 warmup，再输出正式调用的耗时、GFLOPS 和 `PASS` / `FAIL` 校验结果。
 
 CPU 参考结果由 OpenMP 多线程 `sgemm_golden` 生成一次，`sgemm_verify` 使用 `|out-golden| <= atol + rtol*|golden|` 检查每个实现。FP32 默认采用 [PyTorch `assert_close`](https://docs.pytorch.org/docs/stable/testing.html#torch.testing.assert_close) 的 dtype-specific 容差：`rtol=1.3e-6`、`atol=1e-5`；失败时最多打印前 8 个错误元素。
 
@@ -76,11 +77,11 @@ scripts/profile.sh -o sgemm.v0v1.0719
 
 报告会生成到 `ncu-rep/sgemm.v0v1.0719.ncu-rep`。`ncu-rep/` 目录已加入 `.gitignore`。
 
-脚本使用 `--profile-from-start off` 配合程序内的 `cudaProfilerStart/Stop`，因此报告只包含正式的 v0/v1；不依赖 launch 次数、kernel invocation 编号或逐版本正则。脚本传入 `--dry-run`，避免在 Application Replay 的每个 pass 重复 CPU golden/verify。新增实现到 `IMPLEMENTATIONS` 后，会自动走同一套流程。
+脚本使用 `--profile-from-start off` 配合程序内的 `cudaProfilerStart/Stop`，因此报告只包含 `IMPLEMENTATIONS` 中的正式 kernel；不依赖 launch 次数、kernel invocation 编号或逐版本正则。脚本传入 `--dry-run`，避免在 Application Replay 的每个 pass 重复 CPU golden/verify。新增实现到 `IMPLEMENTATIONS` 后，会自动走同一套流程。
 
 脚本还使用 `--replay-mode application`：`full` 集合的每个采集 pass 都会重新启动程序，让每个正式 kernel 在每个 pass 中都重新 warmup。采集约需一分钟，比默认 Kernel Replay 慢，但频率更可比。
 
-`--clock-control none` 明确不修改 GPU 时钟，所以不存在 profiler 结束后忘记解锁的问题。NCU 打印 “Running with unmodified GPU clocks” 是有意选择；仍应在报告中检查 v0/v1 的 SM/DRAM Frequency 是否接近。
+`--clock-control none` 明确不修改 GPU 时钟，所以不存在 profiler 结束后忘记解锁的问题。NCU 打印 “Running with unmodified GPU clocks” 是有意选择；仍应在报告中检查待比较 kernel 的 SM/DRAM Frequency 是否接近。
 
 报告阅读方法见 [docs/ncu-gui-sgemm-analysis.md](docs/ncu-gui-sgemm-analysis.md)。
 

@@ -9,6 +9,7 @@
 - `src/warmup.cu`：正式 kernel 前的 GPU warmup；配合 Application Replay 覆盖每个 NCU 采集 pass。
 - `src/sgemm_v0.cu`：16×16 shared-memory tiling 基线版本。
 - `src/sgemm_v1.cu`：32×32 shared-memory tiling、每线程计算 4 个输出的优化版本。
+- `src/sgemm_v2.cu`：96×96 block tile、每线程计算 12×3 个输出的二维 register tiling 版本。
 - `include/common_utils.h`：通用 CUDA 检查宏、计时器和辅助函数。
 - `include/sgemm_func.h`：SGEMM kernel host 侧调用声明。
 - `include/sgemm_verify.h`：CPU golden/verify 声明与 FP32 默认容差。
@@ -103,3 +104,6 @@ PR 应包含：
 - 若修改构建系统，保持 `scripts/build.sh` 可用，并同步更新本文档。
 - `scripts/*.sh` 应能从任意当前目录执行；新增脚本时参考现有脚本的 `SCRIPT_DIR` / `PROJECT_ROOT` 写法。
 - 当用户说“请指导我”“请引导我”完成某项任务时，采用老师式协作：一步步说明如何实现、如何测试、如何生成报告、如何分析结果，并等待用户实践和反馈。不要直接代替用户执行完整流程、分析报告并给出最终结论。
+- CUDA 学习默认采用“先广度、后深度”的策略：优先让用户依次实践典型 kernel 语法、优化套路和可复用能力；一个阶段在正确性通过、核心机制已理解且有基本性能证据后，应主动收束并进入下一个新知识点。
+- 参数解耦、穷举搜索、极限微调、逐条 SASS 考古和难以改变当前学习结论的硬件细节，默认记录到 `.agents/todo/` 后延；等主要优化模式大致实践一遍后再集中回看。除非它们涉及正确性、越界/race、register spill，阻塞下一知识点，或实验结果与预期严重矛盾，否则不要让其打断学习主线。
+- 开始一项性能工作前，先区分它是在学习“新的通用优化能力”，还是只在当前实现上寻找更优超参数；若属于后者且现有版本已经足够说明核心机制，应明确建议暂缓，而不是默认继续扩大搜索范围。

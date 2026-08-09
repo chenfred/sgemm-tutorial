@@ -58,7 +58,7 @@ ncu_args=(
     # 把可解析的 CUDA 源码永久嵌入报告，换机器打开时也能查看源码关联。
     --import-source yes
 
-    # 不让 NCU 修改 GPU 时钟；依靠应用内 warmup，并在报告中核对 v0/v1 频率。
+    # 不让 NCU 修改 GPU 时钟；依靠应用内 warmup，并在报告中核对待比较 kernel 的频率。
     --clock-control none
 
     # 程序启动时先不采集，只在 cudaProfilerStart/Stop 标记之间启用采集。

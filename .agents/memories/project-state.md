@@ -1,17 +1,20 @@
 # 当前项目状态
 
-更新时间：2026-07-31。
+更新时间：2026-08-09。
 
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- v0/v1 的稳定 profiling 基线仍只使用 `sgemm_v0` 与 `sgemm_v1`；历史试验源码
-  `sgemm_trial_v1_1.cu`、`sgemm_trial_v1_2.cu` 及其 host 声明保留在工程中，但有意不注册到
-  `IMPLEMENTATIONS`，避免干扰日常运行和 NCU 报告。
+- 当前 `IMPLEMENTATIONS` 只注册正式的 `sgemm_v1` 与 `sgemm_v2`；各 `sgemm_trial_*` 源码及 host
+  声明继续保留，但不参与日常运行和 NCU 报告。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
 - `sgemm_trial_v2_1` 已提交：block 为 32×8、K tile 为 32，`REG_TILE_X/Y` 控制二维 thread tile，默认 4×4。B cooperative load 已与 `REG_TILE_Y` 解耦，X/Y 的 1..4 组合全部通过快速完整输出校验；当前计算顺序仍是 `ri -> rj -> t`。
-- 当前工作区已准备未提交的 `sgemm_trial_v2_2` 副本、host 声明和临时 `IMPLEMENTATIONS` 注册；它尚未与 v2_1 形成计算逻辑差异，计划只把计算部分改为 `t -> regA/regB -> ri/rj` 外积结构。
+- `sgemm_trial_v2_2` 已实现 `t -> regA/regB -> ri/rj` 外积结构，当前教学参数为 `REG_TILE_X=3`、`REG_TILE_Y=12`，形成 `96x96` block C tile。默认尺寸完整校验 PASS；快速 benchmark 重复结果约 `0.361 ms / 23.8 TFLOPS`，ptxas 为 96 registers/thread、24 KiB static shared、无 spill。固定 `4x4` 时 v2_1/v2_2 性能在约 1% 内，说明显式循环换序本身没有新增收益。
+- 正式版 `sgemm_v2` 基于 `sgemm_trial_v2_2`：block 为 32×8、C tile 为 96×96、每线程
+  register tile 为 12×3、K tile 默认为 32。A/B cooperative load 均支持 `TILE_K` 分别按
+  `TILEBASE_X/Y` 的整数倍扩展；默认尺寸和非整除用例 `127×259×137` 均 PASS，临时设为
+  `TILE_K=64` 的同一非整除用例也 PASS，验证后已恢复 32。
 - `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
   输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
   accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`

@@ -1,11 +1,11 @@
 # 当前项目状态
 
-更新时间：2026-08-09。
+更新时间：2026-08-10。
 
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- 当前 `IMPLEMENTATIONS` 只注册正式的 `sgemm_v1` 与 `sgemm_v2`；各 `sgemm_trial_*` 源码及 host
+- 当前 `IMPLEMENTATIONS` 只注册正式的 `sgemm_v0`、`sgemm_v1` 与 `sgemm_v2`；各 `sgemm_trial_*` 源码及 host
   声明继续保留，但不参与日常运行和 NCU 报告。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
@@ -15,6 +15,9 @@
   register tile 为 12×3、K tile 默认为 32。A/B cooperative load 均支持 `TILE_K` 分别按
   `TILEBASE_X/Y` 的整数倍扩展；默认尺寸和非整除用例 `127×259×137` 均 PASS，临时设为
   `TILE_K=64` 的同一非整除用例也 PASS，验证后已恢复 32。
+- `sgemm_trial_v3_1` 是供用户亲手实现 vectorized global-to-shared copy 的 v2 标量基线：预置
+  `VECTOR_WIDTH=4`、tile vector 数量、16-byte shared 对齐和编译期整除检查，但尚未实现
+  `float4` 搬运，也未注册到 `IMPLEMENTATIONS`。临时注册后的非整除用例 `127×259×137` PASS。
 - `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
   输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
   accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`

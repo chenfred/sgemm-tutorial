@@ -12,24 +12,24 @@ constexpr u32 REG_TILE_Y = TILEBASE_X / TILEBASE_Y * REG_TILE_X;
 constexpr u32 TILE_K = 32;
 constexpr u32 TILE_X = TILEBASE_X * REG_TILE_X;
 constexpr u32 TILE_Y = TILEBASE_Y * REG_TILE_Y;
-constexpr u32 A_TILE_COLS_PER_THREAD = TILE_K / TILEBASE_X;
-constexpr u32 B_TILE_ROWS_PER_THREAD = TILE_K / TILEBASE_Y;
 
 // v3_1 只试验 global-to-shared copy；计算和写回逻辑保持与 v2 一致。
 constexpr u32 VECTOR_WIDTH = 4;
 constexpr u32 THREAD_COUNT = TILEBASE_X * TILEBASE_Y;
 constexpr u32 A_TILE_VECTOR_COUNT = TILE_Y * TILE_K / VECTOR_WIDTH;
 constexpr u32 B_TILE_VECTOR_COUNT = TILE_K * TILE_X / VECTOR_WIDTH;
+constexpr u32 A_TILE_VECTORS_PER_THREAD = A_TILE_VECTOR_COUNT / THREAD_COUNT;
+constexpr u32 B_TILE_VECTORS_PER_THREAD = B_TILE_VECTOR_COUNT / THREAD_COUNT;
 
 static_assert(TILEBASE_X % TILEBASE_Y == 0);
 static_assert(TILE_K % TILEBASE_X == 0);
 static_assert(TILE_K % TILEBASE_Y == 0);
 static_assert(TILE_X == TILE_Y);
-static_assert(REG_TILE_Y * A_TILE_COLS_PER_THREAD == REG_TILE_X * B_TILE_ROWS_PER_THREAD);
 static_assert(TILE_K % VECTOR_WIDTH == 0);
 static_assert(TILE_X % VECTOR_WIDTH == 0);
 static_assert(A_TILE_VECTOR_COUNT % THREAD_COUNT == 0);
 static_assert(B_TILE_VECTOR_COUNT % THREAD_COUNT == 0);
+static_assert(A_TILE_VECTOR_COUNT == B_TILE_VECTOR_COUNT);
 
 // 标准 SGEMM 语义：C(M,N) = A(M,K) * B(K,N)，K 为收缩维度。
 __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M, int N, int K) {
@@ -44,29 +44,67 @@ __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M
     float regA[REG_TILE_Y] = {};
     float regB[REG_TILE_X] = {};
     for (u32 kOffset = 0; kOffset < K; kOffset += TILE_K) {
-        // TODO(v3_1): 只替换下面 A/B 的 cooperative copy。
-        // 建议先用 float4 global load + 标量 shared store，再尝试 float4 shared store并比较 SASS。
+        u32 threadId = threadIdx.y * TILEBASE_X + threadIdx.x;
+
+        // 把 A tile 展平为 float4 chunk；每线程负责 3 个互不重叠的 chunk。
 #pragma unroll
-        for (u32 ri = 0; ri < REG_TILE_Y; ++ri) {
-            u32 tileRow = TILEBASE_Y * ri + threadIdx.y;
+        for (u32 copyIndex = 0; copyIndex < A_TILE_VECTORS_PER_THREAD; ++copyIndex) {
+            u32 vectorIndex = threadId + copyIndex * THREAD_COUNT;
+            u32 scalarIndex = vectorIndex * VECTOR_WIDTH;
+            u32 tileRow = scalarIndex / TILE_K;
+            u32 tileCol = scalarIndex % TILE_K;
             u32 aRow = baseRow + tileRow;
+            u32 aCol = kOffset + tileCol;
+
+            const bool vectorInBounds = aRow < M && aCol + VECTOR_WIDTH <= K;
+            if (vectorInBounds) {
+                const float* globalAddress = &A[aRow * K + aCol];
+                const bool globalAddressAligned =
+                    reinterpret_cast<std::uintptr_t>(globalAddress) % alignof(float4) == 0;
+                if (globalAddressAligned) {
+                    float4 value = *reinterpret_cast<const float4*>(globalAddress);
+                    *reinterpret_cast<float4*>(&tileA[tileRow][tileCol]) = value;
+                    continue;
+                }
+            }
+
+            // 边界或行首未对齐时退回标量搬运，保持任意 M/K 下的正确性。
 #pragma unroll
-            for (u32 ai = 0; ai < A_TILE_COLS_PER_THREAD; ++ai) {
-                u32 tileCol = TILEBASE_X * ai + threadIdx.x;
-                u32 aCol = kOffset + tileCol;
-                tileA[tileRow][tileCol] = (aRow < M && aCol < K) ? A[aRow * K + aCol] : 0.0f;
+            for (u32 vi = 0; vi < VECTOR_WIDTH; ++vi) {
+                u32 scalarCol = aCol + vi;
+                tileA[tileRow][tileCol + vi] =
+                    (aRow < M && scalarCol < K) ? A[aRow * K + scalarCol] : 0.0f;
             }
         }
 
+        // B 使用同样的 chunk 分配；每个 float4 始终位于同一行内。
 #pragma unroll
-        for (u32 bi = 0; bi < B_TILE_ROWS_PER_THREAD; ++bi) {
-            u32 tileRow = TILEBASE_Y * bi + threadIdx.y;
+        for (u32 copyIndex = 0; copyIndex < B_TILE_VECTORS_PER_THREAD; ++copyIndex) {
+            u32 vectorIndex = threadId + copyIndex * THREAD_COUNT;
+            u32 scalarIndex = vectorIndex * VECTOR_WIDTH;
+            u32 tileRow = scalarIndex / TILE_X;
+            u32 tileCol = scalarIndex % TILE_X;
             u32 bRow = kOffset + tileRow;
+            u32 bCol = baseCol + tileCol;
+
+            const bool vectorInBounds = bRow < K && bCol + VECTOR_WIDTH <= N;
+            if (vectorInBounds) {
+                const float* globalAddress = &B[bRow * N + bCol];
+                const bool globalAddressAligned =
+                    reinterpret_cast<std::uintptr_t>(globalAddress) % alignof(float4) == 0;
+                if (globalAddressAligned) {
+                    float4 value = *reinterpret_cast<const float4*>(globalAddress);
+                    *reinterpret_cast<float4*>(&tileB[tileRow][tileCol]) = value;
+                    continue;
+                }
+            }
+
+            // 边界或行首未对齐时退回标量搬运，保持任意 K/N 下的正确性。
 #pragma unroll
-            for (u32 rj = 0; rj < REG_TILE_X; ++rj) {
-                u32 tileCol = TILEBASE_X * rj + threadIdx.x;
-                u32 bCol = baseCol + tileCol;
-                tileB[tileRow][tileCol] = (bRow < K && bCol < N) ? B[bRow * N + bCol] : 0.0f;
+            for (u32 vi = 0; vi < VECTOR_WIDTH; ++vi) {
+                u32 scalarCol = bCol + vi;
+                tileB[tileRow][tileCol + vi] =
+                    (bRow < K && scalarCol < N) ? B[bRow * N + scalarCol] : 0.0f;
             }
         }
         __syncthreads();

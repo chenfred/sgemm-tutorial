@@ -15,9 +15,10 @@
   register tile 为 12×3、K tile 默认为 32。A/B cooperative load 均支持 `TILE_K` 分别按
   `TILEBASE_X/Y` 的整数倍扩展；默认尺寸和非整除用例 `127×259×137` 均 PASS，临时设为
   `TILE_K=64` 的同一非整除用例也 PASS，验证后已恢复 32。
-- `sgemm_trial_v3_1` 是供用户亲手实现 vectorized global-to-shared copy 的 v2 标量基线：预置
-  `VECTOR_WIDTH=4`、tile vector 数量、16-byte shared 对齐和编译期整除检查，但尚未实现
-  `float4` 搬运，也未注册到 `IMPLEMENTATIONS`。临时注册后的非整除用例 `127×259×137` PASS。
+- `sgemm_trial_v3_1` 在 v2 上只把 global-to-shared copy 改为展平的 `float4` chunk 搬运：完整且
+  16-byte 对齐的 chunk 使用 `float4` global load/shared store，边界或未对齐行退回标量搬运；
+  计算和 C 写回不变，也未注册到 `IMPLEMENTATIONS`。默认尺寸和非整除用例 `127×259×137`
+  均 PASS；SASS 已确认主路径生成 `LDG.E.128/STS.128`，资源为 102 registers/thread，v2 为 96。
 - `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
   输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
   accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`

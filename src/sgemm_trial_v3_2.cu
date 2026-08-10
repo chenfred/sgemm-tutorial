@@ -13,7 +13,7 @@ constexpr u32 TILE_K = 32;
 constexpr u32 TILE_X = TILEBASE_X * REG_TILE_X;
 constexpr u32 TILE_Y = TILEBASE_Y * REG_TILE_Y;
 
-// v3_1 建立展平的标量 copy 对照组；v3_2 只把每个 chunk 的搬运改为 float4。
+// 与 v3_1 使用相同的展平映射；v3_2 只把完整、对齐 chunk 改为 float4 搬运。
 constexpr u32 VECTOR_WIDTH = 4;
 constexpr u32 THREAD_COUNT = TILEBASE_X * TILEBASE_Y;
 constexpr u32 A_TILE_VECTOR_COUNT = TILE_Y * TILE_K / VECTOR_WIDTH;
@@ -32,8 +32,7 @@ static_assert(B_TILE_VECTOR_COUNT % THREAD_COUNT == 0);
 static_assert(A_TILE_VECTOR_COUNT == B_TILE_VECTOR_COUNT);
 
 // 标准 SGEMM 语义：C(M,N) = A(M,K) * B(K,N)，K 为收缩维度。
-__global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M, int N, int K) {
-    // 与 v3_2 保持相同的 shared layout，避免对照实验混入布局差异。
+__global__ void sgemm_trial_v3_2(const float* A, const float* B, float* C, int M, int N, int K) {
     __shared__ __align__(16) float tileA[TILE_Y][TILE_K];
     __shared__ __align__(16) float tileB[TILE_K][TILE_X];
 
@@ -46,7 +45,6 @@ __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M
     for (u32 kOffset = 0; kOffset < K; kOffset += TILE_K) {
         u32 threadId = threadIdx.y * TILEBASE_X + threadIdx.x;
 
-        // 把 A tile 展平为 4-float chunk；每线程负责 3 个互不重叠的 chunk。
 #pragma unroll
         for (u32 copyIndex = 0; copyIndex < A_TILE_VECTORS_PER_THREAD; ++copyIndex) {
             u32 vectorIndex = threadId + copyIndex * THREAD_COUNT;
@@ -56,7 +54,18 @@ __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M
             u32 aRow = baseRow + tileRow;
             u32 aCol = kOffset + tileCol;
 
-            // 每个 chunk 显式执行 4 次标量 load/store，作为 v3_2 的单变量对照。
+            const bool vectorInBounds = aRow < M && aCol + VECTOR_WIDTH <= K;
+            if (vectorInBounds) {
+                const float* globalAddress = &A[aRow * K + aCol];
+                const bool globalAddressAligned =
+                    reinterpret_cast<std::uintptr_t>(globalAddress) % alignof(float4) == 0;
+                if (globalAddressAligned) {
+                    float4 value = *reinterpret_cast<const float4*>(globalAddress);
+                    *reinterpret_cast<float4*>(&tileA[tileRow][tileCol]) = value;
+                    continue;
+                }
+            }
+
 #pragma unroll
             for (u32 vi = 0; vi < VECTOR_WIDTH; ++vi) {
                 u32 scalarCol = aCol + vi;
@@ -65,7 +74,6 @@ __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M
             }
         }
 
-        // B 使用完全相同的标量 chunk 分配。
 #pragma unroll
         for (u32 copyIndex = 0; copyIndex < B_TILE_VECTORS_PER_THREAD; ++copyIndex) {
             u32 vectorIndex = threadId + copyIndex * THREAD_COUNT;
@@ -75,7 +83,18 @@ __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M
             u32 bRow = kOffset + tileRow;
             u32 bCol = baseCol + tileCol;
 
-            // 每个 chunk 显式执行 4 次标量 load/store，作为 v3_2 的单变量对照。
+            const bool vectorInBounds = bRow < K && bCol + VECTOR_WIDTH <= N;
+            if (vectorInBounds) {
+                const float* globalAddress = &B[bRow * N + bCol];
+                const bool globalAddressAligned =
+                    reinterpret_cast<std::uintptr_t>(globalAddress) % alignof(float4) == 0;
+                if (globalAddressAligned) {
+                    float4 value = *reinterpret_cast<const float4*>(globalAddress);
+                    *reinterpret_cast<float4*>(&tileB[tileRow][tileCol]) = value;
+                    continue;
+                }
+            }
+
 #pragma unroll
             for (u32 vi = 0; vi < VECTOR_WIDTH; ++vi) {
                 u32 scalarCol = bCol + vi;
@@ -86,6 +105,7 @@ __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M
         __syncthreads();
 
         for (u32 k = 0; k < TILE_K; ++k) {
+            // shared-to-register load 与外积计算保持和 v3_1 完全一致。
 #pragma unroll
             for (u32 ri = 0; ri < REG_TILE_Y; ++ri) {
                 regA[ri] = tileA[TILEBASE_Y * ri + threadIdx.y][k];
@@ -119,9 +139,9 @@ __global__ void sgemm_trial_v3_1(const float* A, const float* B, float* C, int M
     }
 }
 
-void sgemm_trial_v3_1_do(const float* A, const float* B, float* C, int M, int N, int K) {
+void sgemm_trial_v3_2_do(const float* A, const float* B, float* C, int M, int N, int K) {
     dim3 blockDim{TILEBASE_X, TILEBASE_Y};
     dim3 gridDim{CeilDiv<u32>(N, TILE_X), CeilDiv<u32>(M, TILE_Y)};
 
-    sgemm_trial_v3_1<<<gridDim, blockDim, 0, nullptr>>>(A, B, C, M, N, K);
+    sgemm_trial_v3_2<<<gridDim, blockDim, 0, nullptr>>>(A, B, C, M, N, K);
 }

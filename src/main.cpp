@@ -20,7 +20,8 @@ static const std::vector<SgemmImplementation> IMPLEMENTATIONS = {
     // {"sgemm_v0", sgemm_v0_do},
     // {"sgemm_v1", sgemm_v1_do},
     {"sgemm_v2", sgemm_v2_do},
-    {"sgemm_trial_v3_1",sgemm_trial_v3_1_do},
+    {"sgemm_trial_v3_1", sgemm_trial_v3_1_do},
+    {"sgemm_trial_v3_2", sgemm_trial_v3_2_do},
 };
 
 static void test_sgemm(int M, int N, int K, bool dry_run) {

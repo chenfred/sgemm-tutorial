@@ -5,8 +5,8 @@
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- 当前 `IMPLEMENTATIONS` 只注册正式的 `sgemm_v0`、`sgemm_v1` 与 `sgemm_v2`；各 `sgemm_trial_*` 源码及 host
-  声明继续保留，但不参与日常运行和 NCU 报告。
+- 当前 `IMPLEMENTATIONS` 注册 `sgemm_v2`、`sgemm_trial_v3_1` 与 `sgemm_trial_v3_2`，v0/v1 暂时注释；其余 trial
+  源码和 host 声明保留，但不参与日常运行和 NCU 报告。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
 - `sgemm_trial_v2_1` 已提交：block 为 32×8、K tile 为 32，`REG_TILE_X/Y` 控制二维 thread tile，默认 4×4。B cooperative load 已与 `REG_TILE_Y` 解耦，X/Y 的 1..4 组合全部通过快速完整输出校验；当前计算顺序仍是 `ri -> rj -> t`。
@@ -15,10 +15,12 @@
   register tile 为 12×3、K tile 默认为 32。A/B cooperative load 均支持 `TILE_K` 分别按
   `TILEBASE_X/Y` 的整数倍扩展；默认尺寸和非整除用例 `127×259×137` 均 PASS，临时设为
   `TILE_K=64` 的同一非整除用例也 PASS，验证后已恢复 32。
-- `sgemm_trial_v3_1` 在 v2 上只把 global-to-shared copy 改为展平的 `float4` chunk 搬运：完整且
-  16-byte 对齐的 chunk 使用 `float4` global load/shared store，边界或未对齐行退回标量搬运；
-  计算和 C 写回不变，也未注册到 `IMPLEMENTATIONS`。默认尺寸和非整除用例 `127×259×137`
-  均 PASS；SASS 已确认主路径生成 `LDG.E.128/STS.128`，资源为 102 registers/thread，v2 为 96。
+- `sgemm_trial_v3_1/v3_2` 构成 global-to-shared vectorization 的单变量对照：两者使用相同的
+  展平 chunk 映射、边界语义、shared layout 和计算循环；v3_1 每个 4-float chunk 显式执行
+  4 次标量 load/store，v3_2 只在完整且 16-byte 对齐时换成 `float4`，否则使用同样的标量
+  fallback。默认尺寸和非整除用例 `127×259×137` 均 PASS。SASS 确认 v3_1 copy-in 只有
+  `LDG.E/STS`，v3_2 主路径生成 `LDG.E.128/STS.128`；两者分别使用 96/102 registers/thread，
+  static shared 均为 25600 bytes。单次应用计时不稳定，不作为向量化收益结论。
 - `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
   输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
   accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`

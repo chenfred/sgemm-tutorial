@@ -62,19 +62,23 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 - 实际复杂度来自为宽访问创造条件：原先每线程一个标量的 cooperative copy 可能需要重新分工，还必须处理行跨度对齐、矩阵尾部和标量 fallback。向量化减少搬运指令，但可能增加索引、分支和寄存器，性能不保证提高。
 - `sgemm_trial_v3_1/v3_2` 已足以完成该技巧的学习：相同展平映射下分别生成标量 `LDG.E/STS` 和向量 `LDG.E.128/STS.128`。不继续扩展 shared vectorized load 或更多微调版本，下一主线进入 double buffering。
 
-## Double Buffering 当前认识（2026-08-16）
+## Double Buffering 当前认识（2026-08-17）
 
 - v3_3 的双 shared stage 能隔离 current consumer 与 next producer，但其同步 copy 对同一 warp 仍是依赖链
   `LDG -> STS -> current compute`；明确的普通指令软件流水应拆成 `next LDG -> current LDS/FMA -> next STS`。
 - steady state 末尾的 block barrier 有两个职责：等待所有 next shared store 完成，并等待所有 warp 读完 current，
   防止下一轮复用旧 stage 时覆盖慢 warp 尚未消费的数据。最后一个 stage 计算后不再复用 shared，因此无需 barrier。
-- v3_4 将为每线程保存 A/B 各 12 个 next 值，共约 24 个长生命周期 FP32 临时值。它可能提供同 warp ILP，也可能因
-  registers/thread 增加和 spill 抵消收益；源码顺序只创造调度机会，最终用少量 SASS 和资源/时间指标验证。
+- 正式 v3 每线程保存 A/B 各 12 个 next 值，共约 24 个长生命周期 FP32 临时值，并用
+  `next LDG -> current LDS/FMA -> next STS` 构造同 warp ILP。它已通过默认和多组非整除尺寸，成为后续
+  `cp.async` 的普通 LDG/STS 基线；重复 trial_v3_4 已删除。
+- 下一阶段先用 `<cuda_pipeline.h>` 的 `__pipeline_memcpy_async/commit/wait_prior` 做 4-byte 每线程 copy，保持
+  v3 tile、线程映射和计算不变。该路线最直接验证 kernel 内 global-to-shared 异步路径，并避免一开始同时引入
+  `cuda::pipeline` shared state、16-byte 重排、TMA 或参数搜索。
 
 ## 下一学习方向
 
-1. 完成 v3_4 的普通 LDG register-prefetch DB，验证正确性、spill、资源和基本性能后立即收束。
-2. 如果普通路线已经理解，再独立尝试 async global-to-shared copy；不要与 v3_4 同时混入。
+1. v3 普通 LDG register-prefetch DB 已完成并转正；后续资源报告可补充，但不再阻塞主线。
+2. 按 `.agents/todo/sgemm-v4-cp-async-plan.md` 独立尝试 async global-to-shared copy。
 3. 保持 v2 的 `BX/BY/BK/TM/TN` 不变，不在 DB 学习期重新搜索超参数或展开逐条 SASS 考古。
 4. v1 的 Details 硬件计数虽提示 shared store 约 1.2-way conflict，但 Source/SASS 中三处 shared 访问均为
    `Wavefronts Shared = Ideal`、`Excessive = 0`；不再把 padding/layout 当作当前主要优化方向。

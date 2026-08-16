@@ -10,6 +10,7 @@
 - `src/sgemm_v0.cu`：16×16 shared-memory tiling 基线版本。
 - `src/sgemm_v1.cu`：32×32 shared-memory tiling、每线程计算 4 个输出的优化版本。
 - `src/sgemm_v2.cu`：96×96 block tile、每线程计算 12×3 个输出的二维 register tiling 版本。
+- `src/sgemm_v3.cu`：在 v2 上加入普通 LDG register prefetch 与双 shared stage 的 double buffering 版本。
 - `include/common_utils.h`：通用 CUDA 检查宏、计时器和辅助函数。
 - `include/sgemm_func.h`：SGEMM kernel host 侧调用声明。
 - `include/sgemm_verify.h`：CPU golden/verify 声明与 FP32 默认容差。

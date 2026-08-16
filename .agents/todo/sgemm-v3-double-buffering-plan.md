@@ -1,20 +1,19 @@
 # SGEMM v3 Double Buffering 学习计划
 
-更新时间：2026-08-16。
+更新时间：2026-08-17。
 
 ## 1. 当前检查点
 
 - [x] `sgemm_trial_v3_3` 使用两份 shared tile，实现同步 copy 的 ping-pong stage。
 - [x] 修正 K tile 偏移，删除无效末尾 barrier，并通过现有正确性测试。
 - [x] 恢复与 v2 相同的 `96x96` block tile 和 `12x3` register tile。
-- [x] 建立 `sgemm_trial_v3_4`，加入声明和默认正确性测试入口。
-- [x] v3_4 将 global load 与 shared store 拆开，以寄存器保存 next tile。
-- [x] v3_4 把 current compute 放到 next LDG 与依赖它的 STS 之间。
-- [ ] 检查正确性、register spill 和性能，再决定是否成为正式 v3。
+- [x] 建立 `sgemm_trial_v3_4`，将 global load 与 shared store 拆开，以寄存器保存 next tile。
+- [x] 把 current compute 放到 next LDG 与依赖它的 STS 之间。
+- [x] 默认尺寸与多组非整除边界尺寸均通过正确性校验。
+- [x] 将实现转正为 `src/sgemm_v3.cu`，默认入口保留 v2/v3 对照，并删除重复的 trial_v3_4。
 
-当前实现已经通过用户侧正确性验证，初步性能表现良好；是否无 spill 仍需用编译资源信息或 NCU 确认。
-
-v3_4 源码中的 `TODO(v3_4-1)` 到 `TODO(v3_4-5)` 是推荐实现顺序。一次完成一个小步骤并测试，不同时引入 async copy、vectorized load 或 tile 参数搜索。
+本阶段已经完成。正式 v3 保留普通 `LDG -> register -> STS` 软件流水作为下一阶段 `cp.async` 的基线；
+后续计划见 `sgemm-v4-cp-async-plan.md`。历史 NCU 报告仍可用于确认资源和 spill，但不再阻塞进入下一学习点。
 
 ## 2. 两个 trial 分别在验证什么
 

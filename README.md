@@ -14,6 +14,7 @@ src/warmup.cu         NCU/计时前使用的独立 GPU warmup kernel
 src/sgemm_v0.cu       16×16 shared-memory tiling 基线版本
 src/sgemm_v1.cu       32×32 shared-memory tiling + 每线程 4 个输出
 src/sgemm_v2.cu       96×96 block tile + 每线程 12×3 register tile
+src/sgemm_v3.cu       普通 LDG register prefetch + shared double buffering
 scripts/build.sh      CMake 编译脚本
 scripts/profile.sh    Nsight Compute profiling 脚本
 CMakeLists.txt        CMake 构建配置

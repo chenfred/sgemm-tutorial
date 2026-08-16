@@ -106,11 +106,16 @@ __device__ __forceinline__ void compute_tile_c(float (&regs)[REG_TILE_Y][REG_TIL
     }
 }
 
+struct SharedLayout {
+    float tileA[2][TILE_Y][TILE_K];
+    float tileB[2][TILE_K][TILE_X];
+};
 // v3_4 从 v3_3 的同步 shared ping-pong 起步，目标是加入普通 LDG register prefetch。
 // 标准 SGEMM 语义：C(M,N) = A(M,K) * B(K,N)，K 为收缩维度。
 __global__ void sgemm_trial_v3_4(const float* A, const float* B, float* C, int M, int N, int K) {
-    __shared__ float tileA[2][TILE_Y][TILE_K];
-    __shared__ float tileB[2][TILE_K][TILE_X];
+    extern __shared__ SharedLayout dynShared[];
+    auto& tileA = dynShared[0].tileA;
+    auto& tileB = dynShared[0].tileB;
 
     // next tile 的 global-load 结果跨越 current compute 保持存活；编译器应优先将这些数组标量化到寄存器。
     float prefetchA[REG_TILE_Y][A_TILE_COLS_PER_THREAD];
@@ -168,5 +173,8 @@ void sgemm_trial_v3_4_do(const float* A, const float* B, float* C, int M, int N,
     dim3 blockDim{TILEBASE_X, TILEBASE_Y};
     dim3 gridDim{CeilDiv<u32>(N, TILE_X), CeilDiv<u32>(M, TILE_Y)};
 
-    sgemm_trial_v3_4<<<gridDim, blockDim, 0, nullptr>>>(A, B, C, M, N, K);
+    CUDA_CHECK(
+        cudaFuncSetAttribute(sgemm_trial_v3_4, cudaFuncAttributeMaxDynamicSharedMemorySize, sizeof(SharedLayout)));
+
+    sgemm_trial_v3_4<<<gridDim, blockDim, sizeof(SharedLayout), nullptr>>>(A, B, C, M, N, K);
 }

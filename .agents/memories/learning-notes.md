@@ -56,12 +56,27 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 - 已删除的 v2 与 `v2<0>` 曾尝试通过交换/拆分 reduce 循环消除循环间依赖，但 SASS 和性能没有形成有意义差异，推断编译器已经展开并重排独立累加器。以后不要只凭 CUDA 源码顺序判断 ILP，必须检查 SASS、registers、动态指令和真实时间。
 - 静态分析用于提出假设，NCU 用于证伪；顶层 Compute/Memory SOL 接近 100% 不等于 FP32 或 DRAM 已满，必须下钻到 L1/TEX、DRAM 和具体 FMA pipeline。
 
+## Vectorized Copy 学习结论（2026-08-13）
+
+- `float4` 本身只是对满足 16-byte 对齐的连续 4 个 FP32 做一次宽 load/store；算好合法、连续、对齐的首地址后，语法并不复杂。
+- 实际复杂度来自为宽访问创造条件：原先每线程一个标量的 cooperative copy 可能需要重新分工，还必须处理行跨度对齐、矩阵尾部和标量 fallback。向量化减少搬运指令，但可能增加索引、分支和寄存器，性能不保证提高。
+- `sgemm_trial_v3_1/v3_2` 已足以完成该技巧的学习：相同展平映射下分别生成标量 `LDG.E/STS` 和向量 `LDG.E.128/STS.128`。不继续扩展 shared vectorized load 或更多微调版本，下一主线进入 double buffering。
+
+## Double Buffering 当前认识（2026-08-16）
+
+- v3_3 的双 shared stage 能隔离 current consumer 与 next producer，但其同步 copy 对同一 warp 仍是依赖链
+  `LDG -> STS -> current compute`；明确的普通指令软件流水应拆成 `next LDG -> current LDS/FMA -> next STS`。
+- steady state 末尾的 block barrier 有两个职责：等待所有 next shared store 完成，并等待所有 warp 读完 current，
+  防止下一轮复用旧 stage 时覆盖慢 warp 尚未消费的数据。最后一个 stage 计算后不再复用 shared，因此无需 barrier。
+- v3_4 将为每线程保存 A/B 各 12 个 next 值，共约 24 个长生命周期 FP32 临时值。它可能提供同 warp ILP，也可能因
+  registers/thread 增加和 spill 抵消收益；源码顺序只创造调度机会，最终用少量 SASS 和资源/时间指标验证。
+
 ## 下一学习方向
 
-1. 写 v2 前先熟练从 NCU 的 SOL → Scheduler → Warp State → Memory → Occupancy → Source/SASS 建立证据链。
-2. 主线优先二维 register tiling，例如每线程 4×4 输出，用 `TM+TN` 个 shared 标量支持 `TM×TN` 个 FMA；目标是继续降低 shared load/FMA 和 MIO Throttle。
-3. v2 正确后再做少量 BM/BN/BK/TM/TN 单变量实验，并始终检查 spill、registers、occupancy 和真实时间。
-4. 再优化 cooperative/vectorized global load；只有 Long Scoreboard、Barrier 或 load/compute 气泡成为突出问题后，才进入 double buffering/async copy。
-5. v1 的 Details 硬件计数虽提示 shared store 约 1.2-way conflict，但 Source/SASS 中三处 shared 访问均为 `Wavefronts Shared = Ideal`、`Excessive = 0`，手工地址映射也确认 store 连续、A load 广播、B load 连续。该计数更可能包含不可归因的 L1TEX 仲裁，不应再把 padding/layout 当作 v2 前实验或主要优化方向。
+1. 完成 v3_4 的普通 LDG register-prefetch DB，验证正确性、spill、资源和基本性能后立即收束。
+2. 如果普通路线已经理解，再独立尝试 async global-to-shared copy；不要与 v3_4 同时混入。
+3. 保持 v2 的 `BX/BY/BK/TM/TN` 不变，不在 DB 学习期重新搜索超参数或展开逐条 SASS 考古。
+4. v1 的 Details 硬件计数虽提示 shared store 约 1.2-way conflict，但 Source/SASS 中三处 shared 访问均为
+   `Wavefronts Shared = Ideal`、`Excessive = 0`；不再把 padding/layout 当作当前主要优化方向。
 
 面向学习者的完整说明以 `docs/ncu-gui-sgemm-analysis.md` 和 `docs/v1-to-v2-learning-roadmap.md` 为准；本文件只保存跨会话决策与易丢失经验。

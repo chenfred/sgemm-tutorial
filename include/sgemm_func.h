@@ -14,3 +14,5 @@ void sgemm_trial_v2_1_do(const float* A, const float* B, float* C, int M, int N,
 void sgemm_trial_v2_2_do(const float* A, const float* B, float* C, int M, int N, int K);
 void sgemm_trial_v3_1_do(const float* A, const float* B, float* C, int M, int N, int K);
 void sgemm_trial_v3_2_do(const float* A, const float* B, float* C, int M, int N, int K);
+void sgemm_trial_v3_3_do(const float* A, const float* B, float* C, int M, int N, int K);
+void sgemm_trial_v3_4_do(const float* A, const float* B, float* C, int M, int N, int K);

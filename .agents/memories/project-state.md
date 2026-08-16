@@ -1,12 +1,12 @@
 # 当前项目状态
 
-更新时间：2026-08-10。
+更新时间：2026-08-16。
 
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- 当前 `IMPLEMENTATIONS` 注册 `sgemm_v2`、`sgemm_trial_v3_1` 与 `sgemm_trial_v3_2`，v0/v1 暂时注释；其余 trial
-  源码和 host 声明保留，但不参与日常运行和 NCU 报告。
+- 当前 `IMPLEMENTATIONS` 注册 `sgemm_v2`、`sgemm_trial_v3_3` 与 `sgemm_trial_v3_4`，用于 double buffering
+  学习期的正确性对照；v0/v1 暂时注释，其余 trial 源码和 host 声明保留。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
 - `sgemm_trial_v2_1` 已提交：block 为 32×8、K tile 为 32，`REG_TILE_X/Y` 控制二维 thread tile，默认 4×4。B cooperative load 已与 `REG_TILE_Y` 解耦，X/Y 的 1..4 组合全部通过快速完整输出校验；当前计算顺序仍是 `ri -> rj -> t`。
@@ -21,6 +21,12 @@
   fallback。默认尺寸和非整除用例 `127×259×137` 均 PASS。SASS 确认 v3_1 copy-in 只有
   `LDG.E/STS`，v3_2 主路径生成 `LDG.E.128/STS.128`；两者分别使用 96/102 registers/thread，
   static shared 均为 25600 bytes。单次应用计时不稳定，不作为向量化收益结论。
+- `sgemm_trial_v3_3` 已实现同步 global-to-shared copy 的双 shared stage ping-pong：prologue 准备 stage 0，
+  steady state 同步加载 next 后计算 current，barrier 同时保护 next 完成和 current 生命周期，epilogue 计算最后
+  一个 stage。它验证 stage/synchronization，但没有明确构造同一 warp 内的 LDG/compute 重叠。
+- `sgemm_trial_v3_4` 已实现普通 LDG register-prefetch DB：将 copy 拆成 `global -> prefetch registers`、
+  current compute、`prefetch registers -> shared[next]`，并保留双 shared stage 和 block barrier。用户已验证
+  正确性且初测性能良好；“无 spill”目前是合理推测，仍待编译资源信息或 NCU 确认。
 - `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
   输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
   accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`

@@ -55,7 +55,7 @@ if [[ "${clean}" -eq 1 ]]; then
 fi
 
 cmake -S . -B "${BUILD_DIR}"
-cmake --build "${BUILD_DIR}"
+cmake --build "${BUILD_DIR}" -j16
 
 if [[ "${run}" -eq 1 ]]; then
     "${TARGET}" "${run_args[@]}"

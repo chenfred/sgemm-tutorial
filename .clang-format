@@ -1,0 +1,26 @@
+# 基于 LLVM，调整为项目现有的 C++/CUDA 风格；兼容 clang-format 14。
+BasedOnStyle: LLVM
+Language: Cpp
+Standard: c++17
+
+# 统一使用 4 个空格，续行也采用 4 空格缩进。
+IndentWidth: 4
+ContinuationIndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+# 左花括号不另起一行，控制流和函数体不压缩成单行。
+BreakBeforeBraces: Attach
+AllowShortFunctionsOnASingleLine: Empty
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+AllowShortBlocksOnASingleLine: Never
+
+# 沿用 float* / const float* 写法，保留现有 include 顺序与教学注释排版。
+DerivePointerAlignment: false
+PointerAlignment: Left
+SortIncludes: Never
+IncludeBlocks: Preserve
+ReflowComments: false
+IndentPPDirectives: None

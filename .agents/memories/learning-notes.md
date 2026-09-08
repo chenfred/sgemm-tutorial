@@ -71,14 +71,38 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 - 正式 v3 每线程保存 A/B 各 12 个 next 值，共约 24 个长生命周期 FP32 临时值，并用
   `next LDG -> current LDS/FMA -> next STS` 构造同 warp ILP。它已通过默认和多组非整除尺寸，成为后续
   `cp.async` 的普通 LDG/STS 基线；重复 trial_v3_4 已删除。
-- 下一阶段先用 `<cuda_pipeline.h>` 的 `__pipeline_memcpy_async/commit/wait_prior` 做 4-byte 每线程 copy，保持
-  v3 tile、线程映射和计算不变。该路线最直接验证 kernel 内 global-to-shared 异步路径，并避免一开始同时引入
-  `cuda::pipeline` shared state、16-byte 重排、TMA 或参数搜索。
+- 原计划使用 C pipeline primitives；2026-09-08 按用户要求改为少量 inline PTX，已实现 v4_1 的 4-byte copy，
+  保持 v3 tile、线程映射和计算不变，便于同时入门 async 和 PTX。
+
+## cp.async 学习进展（2026-09-08）
+
+- 本轮已讨论并确认普通 cp.async 的发起粒度、分组、等待参数及 block 同步职责。cp.async 执行时就发起搬运，
+  commit 不是启动开关；commit 前复制可能正在进行或已经完成，但不能未经完成同步就读取结果。
+- commit_group 按线程把此前尚未提交的全部 cp.async 组成新组；分组边界由 commit 位置决定，无显式 group ID，
+  不能向已提交组追加。没有新复制时仍生成空组，视为已完成；不同线程的组相互独立。
+- wait_group N 按线程等待已提交组，允许最新至多 N 个组仍未完成；N 是编译期常量，不是组编号或等待组数。
+  wait_group 0 不包含未 commit 的复制；wait_all 等价于 commit_group + wait_group 0。
+- 当前双缓冲只有一批 next 待完成，不能直接将 wait_group 0 改成 1。正确消费顺序为各线程 wait，然后
+  __syncthreads，再跨线程读取。block barrier 单独不保证 cp.async 完成；warp 调度也不能替代同步语义。
+- 用户曾把循环末尾改为 barrier -> wait，反馈数次 PASS。该顺序缺少跨线程复制完成保证，PASS 仅说明测试未暴露
+  问题；较长计算窗口可能掩盖错误，但未验证实际原因。最新源码已恢复 wait -> barrier，保留用户其他格式修改。
+- inline PTX 的 volatile 与 "memory" 是编译器约束；"memory" 描述未显式列出的内存副作用，当前 copy/commit/wait
+  封装应保留，不能当作硬件 barrier 或完成等待。并非所有 inline PTX 都必须写 memory clobber。
+- 普通 cp.async 每线程每条复制 4/8/16 字节（.ca 支持三种，.cg 仅 16），源/目标需按复制宽度对齐；每线程大小与
+  warp 合并访问是不同概念。v4_1 每线程每 stage 24 次 4-byte copy，warp 地址连续；不能仅改立即数为 16，
+  否则产生重叠/不对齐/边界问题。工业实现按布局常用 16-byte copy、多 stage，搬运映射可独立于计算映射；
+  CUTLASS SM80 SGEMM 示例也有元素宽度 copy。TMA 整 tile 搬运属于后续主题，当前不展开。
+- v3 已通过普通 LDG prefetch 提供延迟隐藏；cp.async 不保证更快。当前 v3/v4_1 都为 128 registers，无 spill，
+  删除源码 prefetch 数组未兑现寄存器数量收益。单次 v4_1 耗时多约 31%，不是稳定结论；4-byte 指令开销、
+  shared 资源竞争和编译调度只是候选原因。应用单次计时区间含 profiler 启动和 host wrapper，需警惕提交间隙。
+- 参考：[PTX cp.async](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async)、
+  [CUTLASS SM80 SGEMM](https://github.com/NVIDIA/cutlass/blob/main/examples/cute/tutorial/sgemm_sm80.cu)。
 
 ## 下一学习方向
 
 1. v3 普通 LDG register-prefetch DB 已完成并转正；后续资源报告可补充，但不再阻塞主线。
-2. 按 `.agents/todo/sgemm-v4-cp-async-plan.md` 独立尝试 async global-to-shared copy。
+2. v4_1 已实现且本轮完成基本同步语义讨论；下一步在正确同步版本上补稳定计时、简化 NCU 对照，条件允许时补
+   memcheck/racecheck。定位到足以解释核心机制后收束，暂不扩展 16-byte 重排、多 stage 搜索或 TMA。
 3. 保持 v2 的 `BX/BY/BK/TM/TN` 不变，不在 DB 学习期重新搜索超参数或展开逐条 SASS 考古。
 4. v1 的 Details 硬件计数虽提示 shared store 约 1.2-way conflict，但 Source/SASS 中三处 shared 访问均为
    `Wavefronts Shared = Ideal`、`Excessive = 0`；不再把 padding/layout 当作当前主要优化方向。

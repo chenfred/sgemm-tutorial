@@ -1,11 +1,21 @@
 # 当前项目状态
 
-更新时间：2026-08-16。
+更新时间：2026-09-08。
 
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- 当前 `IMPLEMENTATIONS` 注册正式 `sgemm_v2` 与 `sgemm_v3`；v0/v1 暂时注释，其余仍存在的 trial 源码和 host 声明保留。
+- 当前 `IMPLEMENTATIONS` 注册正式 `sgemm_v2`、`sgemm_v3` 与 `sgemm_trial_v4_1`；v0/v1 暂时注释，其余仍存在的 trial 源码和 host 声明保留。
+- `sgemm_trial_v4_1` 按用户要求采用少量 inline PTX 入门：沿用 v3 tile、线程映射、双 shared stage 和计算循环，
+  以 4-byte `cp.async.ca.shared.global` 替换 prefetch registers + STS；每轮 issue/commit 后计算 current，
+  再 wait_group 0 + block barrier。尾块用普通 shared store 补零，不构造越界 global 指针。
+  默认尺寸及 `37×53×13`、`70×131×32`、`127×259×45`、`191×257×97` 全部 PASS；SASS 有 LDGSTS。
+  sm_86 / NVCC 13.2.78 下 v3/v4_1 都为 128 registers/thread、无 spill。一次默认应用计时分别约
+  1.680/2.203 ms，仅为初步证据，不是稳定性能结论。memcheck 因 WDDM debugger interface 初始化失败，
+  未完成有效检查，racecheck 也未执行；需 Windows 侧启用调试接口后再验证，不将工具错误归为 kernel 错误。
+  用户随后实验 barrier -> wait 并观察数次 PASS；已说明该顺序没有跨线程复制完成保证。
+  2026-09-08 最新源码已自行恢复 wait -> barrier；本次记忆更新未重新运行测试，先前验证数据属于原正确顺序版本。
+  本轮已完成 cp.async/commit/wait、每线程分组及 memory clobber 的基础讨论，细节见 learning-notes.md。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
 - `sgemm_trial_v2_1` 已提交：block 为 32×8、K tile 为 32，`REG_TILE_X/Y` 控制二维 thread tile，默认 4×4。B cooperative load 已与 `REG_TILE_Y` 解耦，X/Y 的 1..4 组合全部通过快速完整输出校验；当前计算顺序仍是 `ri -> rj -> t`。
@@ -35,8 +45,9 @@
 
 ## 工具链与构建
 
-- 环境是 Ubuntu 22.04 / WSL2、RTX 5080、Compute Capability 12.0（84 SM）。
-- 当前工具链为 CUDA 13.2.2、NVCC 13.2.86、Nsight Compute 2026.1.1；CMake 锁定 `CMAKE_CUDA_ARCHITECTURES=120`。
+- 当前会话 GPU 为 RTX 3060 Laptop、Compute Capability 8.6，NVCC 为 13.2.78；用户已将 CMake 架构改为 86。
+  旧环境为 RTX 5080 / sm_120、NVCC 13.2.86；此前性能数据属于旧环境，不能直接与当前结果比较。
+  架构写死 120 会导致当前 GPU 运行时报 no kernel image；用户已自行修复，此改动需保留。
 - CMake 默认使用 Release，host C++ 链接 OpenMP，CUDA 源文件保留 `-lineinfo -g` 供 NCU 源码/SASS 关联。
 - 常用入口：`scripts/build.sh [--clean] [--run [PROGRAM_ARG...]]`。
 

@@ -2,6 +2,11 @@
 
 更新时间：2026-08-17。
 
+2026-09-08 实现状态：用户明确要求便于 async 与 PTX 入门，v4_1 已直接使用 inline PTX，
+因此下文原定“暂不进入 inline PTX”和 C primitives API 选择已被本次需求替代。
+双 stage 版本已通过默认与四组边界尺寸，确认 LDGSTS、无 spill；memcheck 被 WDDM 调试接口
+初始化失败阻止，racecheck 尚未执行。当前结果见 `.agents/memories/project-state.md`；NCU 对照留待学习阶段继续。
+
 ## 1. 这一阶段只学习什么
 
 目标是在正式 v3 的基础上，把：
@@ -262,10 +267,10 @@ compute-sanitizer --tool racecheck build/sgemm
 
 ## 8. 本阶段完成标准
 
-- [ ] 能区分 kernel 内 `cp.async` 与 host `cudaMemcpyAsync`。
-- [ ] 能解释 issue、commit、wait、block barrier 四者分别保证什么。
+- [x] 已讨论 kernel 内 `cp.async` 与 host `cudaMemcpyAsync` 的区别。
+- [x] 已讨论 issue、commit、wait、block barrier、每线程分组和等待参数语义。
 - [ ] `sgemm_trial_v4_1` 通过默认与非整除尺寸，并通过 memcheck/racecheck。
-- [ ] SASS 确认生成异步 global-to-shared 路径，且没有 register spill。
+- [x] SASS 确认生成异步 global-to-shared 路径，且没有 register spill。
 - [ ] 用一份简化 NCU 报告比较 v3/v4_1 的时间、寄存器和主要 stall。
 - [ ] 无论是否加速，都记录原因并收束；不要立刻进入 TMA 或超参数搜索。
 - [ ] 若机制清楚且证据充分，再决定是否转正为 `sgemm_v4`。

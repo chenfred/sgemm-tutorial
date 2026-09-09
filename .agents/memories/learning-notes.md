@@ -101,8 +101,15 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 ## 下一学习方向
 
 1. v3 普通 LDG register-prefetch DB 已完成并转正；后续资源报告可补充，但不再阻塞主线。
-2. v4_1 已实现且本轮完成基本同步语义讨论；下一步在正确同步版本上补稳定计时、简化 NCU 对照，条件允许时补
-   memcheck/racecheck。定位到足以解释核心机制后收束，暂不扩展 16-byte 重排、多 stage 搜索或 TMA。
+   v4 已由 trial_v4_1 复制转正，保持 v3 -> v4 只替换搬运路径的教学连续性；trial_v4_2 保留多 stage 实验用途。
+2. 2026-09-09 用户要求在 v4_2 演进固定三 stage，已实现并通过默认和七组边界校验。
+   用户偏好主 for 只有一个目标（循环所有计算次数），已改为先预填满三组，computeTile 驱动全部计算，
+   计算后在原 stage 补入 computeTile+STAGES；消费前按剩余块数 wait_group 2/1/0，理解环形 stage 安全复用。
+   随后按用户要求将当前 v4_2 改为双 stage 对照，等待参数改为 1/0；七次默认测试 PASS，
+   v4_1/v4_2 吞吐中位数约 3.742/3.816 TFLOPS，差约 2%，应用计时波动明显，暂认为接近。
+   三 stage 的明显退化在该双 stage 对照中未重现，但尚不能据此确认 shared 驻留或启动/收尾哪项是主因。
+   保留分开的就绪/复用 barrier 便于理解；不是性能优化结论。待用户理解后收束并进入 Tensor Core/MMA，
+   暂缓 stage 搜索、16-byte 重排和 TMA；稳定计时/简化 NCU 和受环境限制的 Sanitizer 仍待补充。
 3. 保持 v2 的 `BX/BY/BK/TM/TN` 不变，不在 DB 学习期重新搜索超参数或展开逐条 SASS 考古。
 4. v1 的 Details 硬件计数虽提示 shared store 约 1.2-way conflict，但 Source/SASS 中三处 shared 访问均为
    `Wavefronts Shared = Ideal`、`Excessive = 0`；不再把 padding/layout 当作当前主要优化方向。

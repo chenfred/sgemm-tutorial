@@ -1,11 +1,26 @@
 # 当前项目状态
 
-更新时间：2026-09-08。
+更新时间：2026-09-09。
 
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- 当前 `IMPLEMENTATIONS` 注册正式 `sgemm_v2`、`sgemm_v3` 与 `sgemm_trial_v4_1`；v0/v1 暂时注释，其余仍存在的 trial 源码和 host 声明保留。
+- 当前 `IMPLEMENTATIONS` 按顺序注册正式 `sgemm_v0`、`sgemm_v1`、`sgemm_v2`、`sgemm_v3`、`sgemm_v4`。
+- 正式 v4 按用户要求从 trial_v4_1 复制，仅改 kernel/wrapper 名和版本注释；保留两个 trial 的源码与声明，
+  默认不运行 trial。教学主线为 v2 register tiling -> v3 LDG 预取双缓冲 -> v4 cp.async 双缓冲。
+- v4_2 当前按用户要求设为 STAGES=2 做双缓冲对照（此前三 stage 数据为历史实验）。
+  等待分支同步改为 remaining>=2 时 wait_group 1，否则 wait_group 0，static_assert 固定为 2。
+  shared 48 KiB，sm_86 下 100 registers/thread、无 spill。默认尺寸连续七次均 PASS；应用计时未锁频且固定版本顺序。
+  v4_1 时间为 [2.465,2.381,2.296,2.199,2.867,2.161,2.106] ms，v4_2 为
+  [2.486,2.251,2.291,2.282,2.218,2.104,2.143] ms；中位数 2.296/2.251 ms，吞吐中位数约 3.742/3.816 TFLOPS，
+  v4_2 高约 2%，在本次波动下视为接近，不能确立稳定领先。双 stage 尚未重跑边界集。
+- v4_2 历史三 stage 教学版沿用 v4_1 的 tile、copy 映射和 compute：按用户偏好预填满最多三组，
+  主循环 computeTile 每轮只计算一块。消费前按剩余块数 wait_group 2/1/0 + barrier；计算后若还有新块，
+  barrier 确认读完，再向原 stage 搬入 computeTile+STAGES 并 commit。无独立计算 epilogue。
+  数据就绪和读完复用使用分开的 barrier；static_assert 固定三 stage。shared 为 72 KiB，sm_86 下 80 registers/thread、无 spill。
+  默认及 `37×53×13`、`70×131×32`、`127×259×45`、`97×113×64`、`191×257×97`、`101×203×193`、
+  `96×192×96` 在重构后全部 PASS。单次默认计时 v4_1/v4_2 为 2.089/3.497 ms，不作稳定性能结论。
+  未重试此前受 WDDM 限制的 Sanitizer；下一步由用户阅读三 stage 生命周期，不继续搜索参数。
 - `sgemm_trial_v4_1` 按用户要求采用少量 inline PTX 入门：沿用 v3 tile、线程映射、双 shared stage 和计算循环，
   以 4-byte `cp.async.ca.shared.global` 替换 prefetch registers + STS；每轮 issue/commit 后计算 current，
   再 wait_group 0 + block barrier。尾块用普通 shared store 补零，不构造越界 global 指针。
@@ -67,6 +82,9 @@
 - 2026-07-19 报告共 40 个 Application Replay pass：v0/v1 SM 频率为 2.949968/2.936141 GHz，差约 0.47%；DRAM 频率差约 0.0018%；Duration 为 1.683520/0.705600 ms，v1 约快 2.39 倍。
 
 ## 工作区注意事项
+
+- 正式版快速复习说明为 `docs/sgemm_v0.md` 至 `docs/sgemm_v4.md`，逐版对应源码的切分、搬运、计算、同步和边界。
+  `docs/README.md` 提供版本参数总览并区分早期 NCU 材料；根 README 已链接，后续改正式版时同步维护这些说明。
 
 - `draft.md` 是用户维护的任务草稿；发现未提交修改时不得覆盖或清理。
 - `build/`、`ncu-rep/` 是本地产物。不要把二进制报告当作可提交的项目记忆。

@@ -8,6 +8,10 @@ CompileFlags:
 ---
 If:
   PathMatch: '.*\.cu(h)?'
+CompileFlags:
+  # 用两台机器共有的 sm_86 功能集解析 CUDA，启用 WMMA/TF32 声明；实际编译架构仍由 CMake 决定。
+  Add:
+    - --cuda-gpu-arch=sm_86
 Completion:
   # CUDA 内建变量来自 Clang 私有隐式头，禁止补全时把该头显式插入源码。
   HeaderInsertion: Never

@@ -74,15 +74,15 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 - 原计划使用 C pipeline primitives；2026-09-08 按用户要求改为少量 inline PTX，已实现 v4_1 的 4-byte copy，
   保持 v3 tile、线程映射和计算不变，便于同时入门 async 和 PTX。
 
-## cp.async 学习进展（2026-09-08）
+## cp.async 学习进展（2026-10-18 核对）
 
-- 本轮已讨论并确认普通 cp.async 的发起粒度、分组、等待参数及 block 同步职责。cp.async 执行时就发起搬运，
+- 此前已讨论普通 cp.async 的发起粒度、分组、等待参数及 block 同步职责。cp.async 执行时就发起搬运，
   commit 不是启动开关；commit 前复制可能正在进行或已经完成，但不能未经完成同步就读取结果。
 - commit_group 按线程把此前尚未提交的全部 cp.async 组成新组；分组边界由 commit 位置决定，无显式 group ID，
   不能向已提交组追加。没有新复制时仍生成空组，视为已完成；不同线程的组相互独立。
 - wait_group N 按线程等待已提交组，允许最新至多 N 个组仍未完成；N 是编译期常量，不是组编号或等待组数。
   wait_group 0 不包含未 commit 的复制；wait_all 等价于 commit_group + wait_group 0。
-- 当前双缓冲只有一批 next 待完成，不能直接将 wait_group 0 改成 1。正确消费顺序为各线程 wait，然后
+- 正式 v4 / v4_1 的双缓冲只有一批 next 待完成，不能直接将 wait_group 0 改成 1。正确消费顺序为各线程 wait，然后
   __syncthreads，再跨线程读取。block barrier 单独不保证 cp.async 完成；warp 调度也不能替代同步语义。
 - 用户曾把循环末尾改为 barrier -> wait，反馈数次 PASS。该顺序缺少跨线程复制完成保证，PASS 仅说明测试未暴露
   问题；较长计算窗口可能掩盖错误，但未验证实际原因。最新源码已恢复 wait -> barrier，保留用户其他格式修改。
@@ -92,7 +92,8 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
   warp 合并访问是不同概念。v4_1 每线程每 stage 24 次 4-byte copy，warp 地址连续；不能仅改立即数为 16，
   否则产生重叠/不对齐/边界问题。工业实现按布局常用 16-byte copy、多 stage，搬运映射可独立于计算映射；
   CUTLASS SM80 SGEMM 示例也有元素宽度 copy。TMA 整 tile 搬运属于后续主题，当前不展开。
-- v3 已通过普通 LDG prefetch 提供延迟隐藏；cp.async 不保证更快。当前 v3/v4_1 都为 128 registers，无 spill，
+- v3 已通过普通 LDG prefetch 提供延迟隐藏；cp.async 不保证更快。历史 RTX 3060 Laptop / sm_86 编译中
+  v3/v4_1 都为 128 registers、无 spill，
   删除源码 prefetch 数组未兑现寄存器数量收益。单次 v4_1 耗时多约 31%，不是稳定结论；4-byte 指令开销、
   shared 资源竞争和编译调度只是候选原因。应用单次计时区间含 profiler 启动和 host wrapper，需警惕提交间隙。
 - 参考：[PTX cp.async](https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async)、
@@ -100,18 +101,27 @@ v1 的核心收益不是提高 occupancy，而是每线程计算 4 个输出后�
 
 ## 下一学习方向
 
+用户已完成 v5 的 TF32 WMMA（16×16×8，FP32 累加）入门实现，直接从 global 加载 fragment；
+整除尺寸 `1024×4096×1024` 与 v0～v4 同一入口全部 PASS。专用学习模式已按要求删除，直接修改 `cases` 实验。
+当前所有版本统一输入 `(i % 100) / 128.0f`，避免量化误差干扰 API 学习；一般 FP32 输入的精度验证后续单独处理。
+v5 当前没有尾块处理或 shared tiling/DB；继续保持用户亲自实现、agent 静态指导的协作方式。
+
+最新 NCU 已说明 TC 计算单元并不自动兑现端到端加速：v5 的 16×16 tile 相比 v2～v4 的 96×96 tile
+缺少 block 内显式数据复用，逻辑 global 读取约增至 5.89 倍，L1 sector 请求约 8.83 倍。
+报告的 L2 90.55% 来自 tag-request 吞吐，不是字节带宽；DRAM 仅 5.54%。详见 project-state.md 的报告结论。
+下一教学实验优先多 warp 的 WMMA shared tiling，先复用再流水，不重新搜索 tile 超参数或直接引入 TMA。
+
 1. v3 普通 LDG register-prefetch DB 已完成并转正；后续资源报告可补充，但不再阻塞主线。
    v4 已由 trial_v4_1 复制转正，保持 v3 -> v4 只替换搬运路径的教学连续性；trial_v4_2 保留多 stage 实验用途。
-2. 2026-09-09 用户要求在 v4_2 演进固定三 stage，已实现并通过默认和七组边界校验。
-   用户偏好主 for 只有一个目标（循环所有计算次数），已改为先预填满三组，computeTile 驱动全部计算，
-   计算后在原 stage 补入 computeTile+STAGES；消费前按剩余块数 wait_group 2/1/0，理解环形 stage 安全复用。
-   随后按用户要求将当前 v4_2 改为双 stage 对照，等待参数改为 1/0；七次默认测试 PASS，
-   v4_1/v4_2 吞吐中位数约 3.742/3.816 TFLOPS，差约 2%，应用计时波动明显，暂认为接近。
-   三 stage 的明显退化在该双 stage 对照中未重现，但尚不能据此确认 shared 驻留或启动/收尾哪项是主因。
-   保留分开的就绪/复用 barrier 便于理解；不是性能优化结论。待用户理解后收束并进入 Tensor Core/MMA，
-   暂缓 stage 搜索、16-byte 重排和 TMA；稳定计时/简化 NCU 和受环境限制的 Sanitizer 仍待补充。
+2. v4_2 已实践“预填满、computeTile 驱动全部计算、算完补入”的环形流水线；当前固定双 stage，
+   允许最新一组在途，等待参数按收尾改为 1/0，就绪/复用 barrier 分开，曾试过三 stage。
+   历史笔记本性能结论与待验证项集中见 project-state.md，不把它们当作本机 RTX 5080 的实测结果。
+   待用户理解 stage 生命周期后可收束并进入 Tensor Core/MMA；不默认继续 stage 搜索、16-byte 重排和 TMA。
+   稳定计时/简化 NCU 和 Sanitizer 仍可补充，尚未在本机完成这些检查。
 3. 保持 v2 的 `BX/BY/BK/TM/TN` 不变，不在 DB 学习期重新搜索超参数或展开逐条 SASS 考古。
 4. v1 的 Details 硬件计数虽提示 shared store 约 1.2-way conflict，但 Source/SASS 中三处 shared 访问均为
    `Wavefronts Shared = Ideal`、`Excessive = 0`；不再把 padding/layout 当作当前主要优化方向。
 
-面向学习者的完整说明以 `docs/ncu-gui-sgemm-analysis.md` 和 `docs/v1-to-v2-learning-roadmap.md` 为准；本文件只保存跨会话决策与易丢失经验。
+面向学习者的版本复习入口为 `docs/README.md` 和 `docs/sgemm_v0.md` 至 `docs/sgemm_v4.md`；
+`docs/ncu-gui-sgemm-analysis.md`、`docs/v1-to-v2-learning-roadmap.md` 是早期阶段材料。
+本文件只保存跨会话决策与易丢失经验。

@@ -12,6 +12,7 @@
 - `src/sgemm_v2.cu`：96×96 block tile、每线程计算 12×3 个输出的二维 register tiling 版本。
 - `src/sgemm_v3.cu`：在 v2 上加入普通 LDG register prefetch 与双 shared stage 的 double buffering 版本。
 - `src/sgemm_v4.cu`：基于 v3 的 cp.async 双缓冲版本，由 trial_v4_1 复制转正，保留实验版。
+- `src/sgemm_v5.cu`：TF32 WMMA 入门版本，每个 warp 计算一个 16×16 输出块，当前仅支持整除尺寸。
 - `include/common_utils.h`：通用 CUDA 检查宏、计时器和辅助函数。
 - `include/sgemm_func.h`：SGEMM kernel host 侧调用声明。
 - `include/sgemm_verify.h`：CPU golden/verify 声明与 FP32 默认容差。
@@ -65,7 +66,7 @@ scripts/build.sh --run
 
 ## 测试指南
 
-当前测试由 `src/main.cpp` 编排，CPU 参考计算与校验位于 `src/verify.cpp`。GPU 输出按 `|out-golden| <= atol + rtol*|golden|` 比较，FP32 默认 `rtol=1.3e-6`、`atol=1e-5`。为简化 v0/v1 的 NCU 报告，当前默认只跑 `1024×4096×1024`。
+当前测试由 `src/main.cpp` 编排，CPU 参考计算与校验位于 `src/verify.cpp`。GPU 输出按 `|out-golden| <= atol + rtol*|golden|` 比较，FP32 默认 `rtol=1.3e-6`、`atol=1e-5`。当前默认以 `1024×4096×1024` 对比 v0～v5；输入为 `(i % 100) / 128.0f`，可由 TF32/FP32 精确表示。v5 暂要求 M/N 是 16 的倍数、K 是 8 的倍数。
 
 开发时建议至少运行：
 

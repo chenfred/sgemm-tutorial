@@ -1,36 +1,32 @@
 # 当前项目状态
 
-更新时间：2026-09-09。
+更新时间：2026-10-18。
+
+本地代码基线为提交 `83b6fae`，用户随后完成 v5 WMMA 入门实现。2026-10-18 构建和 clang-format 检查通过；
+本机默认 v0～v5 在 `1024×4096×1024` 全部 PASS。用户已采集下述 NCU 报告；历史资源/性能数据需按机器与输入配置区分。
 
 ## 不变量与代码结构
 
 - SGEMM 语义固定为 `C(M,N) = A(M,K) × B(K,N)`；A/B/C 分别为 M×K、K×N、M×N，K 是收缩维度。
-- 当前 `IMPLEMENTATIONS` 按顺序注册正式 `sgemm_v0`、`sgemm_v1`、`sgemm_v2`、`sgemm_v3`、`sgemm_v4`。
+- 当前 `IMPLEMENTATIONS` 按顺序注册 `sgemm_v0` 至 `sgemm_v5`，共用一个测试路径，CLI 只保留 `--dry-run`。
+- 用户已完成 v5 的 fragment、global load、TF32 转换、mma 与 global store：一个 block=32 threads，
+  WMMA shape=16×16×8，FP32 累加，host 接口仍为 float。A/B 均为 row-major，输入从 global 直接加载至 fragment，
+  当前没有 shared tiling/DB。仅支持 M/N 为 16 的倍数、K 为 8 的倍数；没有尾块处理。
+- 按用户要求删除了 `wmma_learning`、`--wmma`、专用实现列表/用例与 NaN 预填充；普通入口直接对比 v0～v5。
+  统一输入改为 `(i % 100) / 128.0f`，可由 TF32 精确表示，沿用既有 FP32 容差；整除不等于能消除输入量化误差。
+  v5 是用户亲自学习的实现，后续优先静态指导，不自动代写优化。当前循环中仍保留多余的 `__syncthreads()`，
+  已说明纯 global→fragment→MMA 路径在 load/mma 前后都不需要额外 block barrier，留给用户自行清理。
 - 正式 v4 按用户要求从 trial_v4_1 复制，仅改 kernel/wrapper 名和版本注释；保留两个 trial 的源码与声明，
   默认不运行 trial。教学主线为 v2 register tiling -> v3 LDG 预取双缓冲 -> v4 cp.async 双缓冲。
-- v4_2 当前按用户要求设为 STAGES=2 做双缓冲对照（此前三 stage 数据为历史实验）。
-  等待分支同步改为 remaining>=2 时 wait_group 1，否则 wait_group 0，static_assert 固定为 2。
-  shared 48 KiB，sm_86 下 100 registers/thread、无 spill。默认尺寸连续七次均 PASS；应用计时未锁频且固定版本顺序。
-  v4_1 时间为 [2.465,2.381,2.296,2.199,2.867,2.161,2.106] ms，v4_2 为
-  [2.486,2.251,2.291,2.282,2.218,2.104,2.143] ms；中位数 2.296/2.251 ms，吞吐中位数约 3.742/3.816 TFLOPS，
-  v4_2 高约 2%，在本次波动下视为接近，不能确立稳定领先。双 stage 尚未重跑边界集。
-- v4_2 历史三 stage 教学版沿用 v4_1 的 tile、copy 映射和 compute：按用户偏好预填满最多三组，
-  主循环 computeTile 每轮只计算一块。消费前按剩余块数 wait_group 2/1/0 + barrier；计算后若还有新块，
-  barrier 确认读完，再向原 stage 搬入 computeTile+STAGES 并 commit。无独立计算 epilogue。
-  数据就绪和读完复用使用分开的 barrier；static_assert 固定三 stage。shared 为 72 KiB，sm_86 下 80 registers/thread、无 spill。
-  默认及 `37×53×13`、`70×131×32`、`127×259×45`、`97×113×64`、`191×257×97`、`101×203×193`、
-  `96×192×96` 在重构后全部 PASS。单次默认计时 v4_1/v4_2 为 2.089/3.497 ms，不作稳定性能结论。
-  未重试此前受 WDDM 限制的 Sanitizer；下一步由用户阅读三 stage 生命周期，不继续搜索参数。
-- `sgemm_trial_v4_1` 按用户要求采用少量 inline PTX 入门：沿用 v3 tile、线程映射、双 shared stage 和计算循环，
+- 正式 v4 / `sgemm_trial_v4_1` 按用户要求采用少量 inline PTX 入门：沿用 v3 的 32×8 block、96×96 C tile、
+  12×3 register tile、K tile=32、双 shared stage（48 KiB）和计算循环，
   以 4-byte `cp.async.ca.shared.global` 替换 prefetch registers + STS；每轮 issue/commit 后计算 current，
   再 wait_group 0 + block barrier。尾块用普通 shared store 补零，不构造越界 global 指针。
-  默认尺寸及 `37×53×13`、`70×131×32`、`127×259×45`、`191×257×97` 全部 PASS；SASS 有 LDGSTS。
-  sm_86 / NVCC 13.2.78 下 v3/v4_1 都为 128 registers/thread、无 spill。一次默认应用计时分别约
-  1.680/2.203 ms，仅为初步证据，不是稳定性能结论。memcheck 因 WDDM debugger interface 初始化失败，
-  未完成有效检查，racecheck 也未执行；需 Windows 侧启用调试接口后再验证，不将工具错误归为 kernel 错误。
-  用户随后实验 barrier -> wait 并观察数次 PASS；已说明该顺序没有跨线程复制完成保证。
-  2026-09-08 最新源码已自行恢复 wait -> barrier；本次记忆更新未重新运行测试，先前验证数据属于原正确顺序版本。
-  本轮已完成 cp.async/commit/wait、每线程分组及 memory clobber 的基础讨论，细节见 learning-notes.md。
+- `sgemm_trial_v4_2` 当前固定 `STAGES=2`：先预填满，主循环每轮计算一块，再向原 stage 补入
+  `computeTile+STAGES`。消费前 remaining>=2 时 wait_group 1，否则 wait_group 0；就绪和复用使用分开的
+  block barrier，无独立计算 epilogue。该版本曾试过三 stage，但当前源码不能仅修改 STAGES 就自动适配等待逻辑。
+- 已学习 cp.async/commit/wait、每线程分组和 memory clobber。用户试过 barrier -> wait 且数次 PASS，
+  但该顺序缺少跨线程完成保证；当前正式 v4 / v4_1 已恢复 wait -> barrier。细节见 learning-notes.md。
 - v0：16×16 shared-memory tile，每线程计算一个输出。
 - v1：32×32 shared-memory tile，block 为 32×8，每线程沿 M 方向计算 4 个输出。
 - `sgemm_trial_v2_1` 已提交：block 为 32×8、K tile 为 32，`REG_TILE_X/Y` 控制二维 thread tile，默认 4×4。B cooperative load 已与 `REG_TILE_Y` 解耦，X/Y 的 1..4 组合全部通过快速完整输出校验；当前计算顺序仍是 `ri -> rj -> t`。
@@ -50,7 +46,7 @@
   一个 stage。它验证 stage/synchronization，但没有明确构造同一 warp 内的 LDG/compute 重叠。
 - 正式 `sgemm_v3` 由 `sgemm_trial_v3_4` 转正：将 copy 拆成 `global -> prefetch registers`、current compute、
   `prefetch registers -> shared[next]`，并保留双 shared stage 和 block barrier。默认尺寸和多组非整除尺寸均
-  PASS；重复的 trial_v3_4 源码与声明已删除。v3 将作为后续 `cp.async` 版本的普通 LDG/STS 基线。
+  PASS；重复的 trial_v3_4 源码与声明已删除。v3 是 v4 的普通 LDG/STS 对照基线。
 - `sgemm_trial_v1_1` 恢复自 `df41736` 中的原 `sgemm_v1`：block 为 16×16、每线程计算 2×2
   输出、K tile 为 8。`sgemm_trial_v1_2` 对应原 `sgemm_v2<false>`；它与当前 v1 都采用
   accumulator 外层、K 内层的源码循环顺序。两个 trial 已临时注册并通过 `1024×4096×1024`
@@ -58,12 +54,47 @@
 - `src/warmup.cu` 提供独立 warmup；`src/verify.cpp` 提供 OpenMP 多线程 CPU golden 与 verify。
 - 默认只运行 `1024×4096×1024`，以保持 NCU 报告简单。开发新 kernel 时必须临时加入至少一个 M/N/K 不相等且不能被 tile 整除的用例。
 
+## v5 NCU 报告结论（2026-10-18，RTX 5080）
+
+- 报告 `ncu-rep/sgemm.v1v2v3v4v5.ncu-rep` 实际包含 v0～v5，尺寸为 `1024×4096×1024`；
+  NCU 2026.1.1、Application Replay、clock-control none，已嵌入源码。此次仅读取既有报告，没有重新采集或修改 kernel。
+- Duration：v1 703.904 us、v2 339.392 us、v3 328.192 us、v4 412.160 us、v5 540.032 us。
+  v5 仅快于 v0/v1，慢于 v2～v4，不能描述为已经超越优化后的 CUDA Core 实现。
+- v5 L2 Throughput 90.55% 的最大组成项是 tag requests；sector throughput 约 51.46%，DRAM Throughput 5.54%。
+  主因应描述为 L2 请求处理压力与 global load 等待，不能把 90.55% 当成 L2 字节带宽或 DRAM 饱和。
+- v5 逻辑 global A/B 读取共 2 GiB，v2～v4 共 348 MiB，约 5.89 倍；L1 global-load sector 请求量为
+  3 GiB 对 348 MiB，约 8.83 倍，说明 v5 还有访存事务放大。上述均不等于 DRAM 流量。
+  缓存后 L2→L1 read bytes 为 1,380,490,336 对 364,904,448，约 3.78 倍。
+- v5 一 warp/block 被 24 blocks/SM 限制，理论 occupancy 50%，实测 48.49%；No Eligible 79.58%。
+  报告已确认 HMMA TF32 路径以及循环中的 BAR；barrier 等待占比仅约 0.32%，不是主要性能解释。
+- Tensor active cycles 56.84% 不等于算术峰值利用率；TF32 ops 的 pct-of-peak 为 12.54%。
+  Source 中 TF32 转换位置的大量 long-scoreboard 采样是等待前序 LD 的寄存器结果，不能据此认定转换算术慢。
+- 两个 subagent 的报告解读与静态流量模型已经互相核对，详细指标、口径和复查命令保存于
+  `.agents/analysis/sgemm-v5-ncu-findings.md`；当前 SM 频率差仅约 1.7%，不解释主要性能差距。
+- 保留 v5 为 WMMA 入门基线；下一实验优先多 warp/block + shared tiling（例如 4 warps/32×32 C tile），
+  显式复用 A/B、合并搬运，再考虑接回 cp.async。仅把多个独立 warp 打包进 block 不会自动减少重复读取。
+
+## v4 历史实验与待验证项
+
+- 2026-09 的实验机器是 RTX 3060 Laptop / sm_86、NVCC 13.2.78，与当前本机不同。
+- v4_1 的默认尺寸及 `37×53×13`、`70×131×32`、`127×259×45`、`191×257×97` 全部 PASS，SASS 有 LDGSTS。
+  v3/v4_1 均为 128 registers/thread、无 spill；一次计时约 1.680/2.203 ms，不构成稳定快慢结论。
+- v4_2 双 stage 为 48 KiB shared、100 registers/thread、无 spill；默认尺寸七次 PASS，尚未重跑边界集。
+  v4_1/v4_2 时间中位数 2.296/2.251 ms，约差 2%；未锁频、版本顺序固定且波动明显，视为接近。
+- v4_2 历史三 stage 为 72 KiB shared、80 registers/thread、无 spill；默认和七组边界 PASS。
+  曾出现明显退化，但没有稳定证据确定主因；该配置已改回双 stage，不将三 stage 的边界结果视为当前版本复测。
+- memcheck 曾因 WDDM debugger interface 初始化失败，未完成有效检查，racecheck 也未执行。
+  这是另一台机器的工具限制，不能直接认定当前 RTX 5080 也无法检查。
+- 当前 RTX 5080 的 v4 默认尺寸已在接入 v5 骨架后重测 PASS；非整除尺寸、资源、sanitizer 和稳定 NCU 对照未重测。
+
 ## 工具链与构建
 
-- 当前会话 GPU 为 RTX 3060 Laptop、Compute Capability 8.6，NVCC 为 13.2.78；用户已将 CMake 架构改为 86。
-  旧环境为 RTX 5080 / sm_120、NVCC 13.2.86；此前性能数据属于旧环境，不能直接与当前结果比较。
-  架构写死 120 会导致当前 GPU 运行时报 no kernel image；用户已自行修复，此改动需保留。
+- 2026-10-18 只读核验：本机 RTX 5080 / Compute Capability 12.0、NVCC 13.2.86、NCU 2026.1.1。
+  沙箱内 NVML 报 GPU access blocked，沙箱外 nvidia-smi 查询正常。
+- 当前 CMake 配置 `CMAKE_CUDA_ARCHITECTURES=86;120`，同时覆盖两台机器；不要误恢复成仅 86 或仅 120。
+  历史上仅编译 sm_120 曾让 RTX 3060 报 no kernel image。
 - CMake 默认使用 Release，host C++ 链接 OpenMP，CUDA 源文件保留 `-lineinfo -g` 供 NCU 源码/SASS 关联。
+- 仓库已有兼容 clang-format 14 的 `.clang-format`，后续修改 C++/CUDA 直接按仓库配置格式化，无需早期临时兼容配置。
 - 常用入口：`scripts/build.sh [--clean] [--run [PROGRAM_ARG...]]`。
 
 ## 正确性与执行模式
@@ -72,13 +103,15 @@
 - FP32 混合容差采用 `|out-golden| <= atol + rtol*|golden|`，默认 `rtol=1.3e-6`、`atol=1e-5`；Inf 只有完全相等才通过，NaN 默认失败。
 - verify 并行统计全部错误；失败时再顺序扫描，稳定地只打印前 8 个错误位置和值。
 - `--dry-run` 仍执行数据生成、H2D、warmup、正式 kernel 和 D2H，但跳过 CPU golden/verify 与应用侧计时输出。
+  普通运行使用 `scripts/build.sh --run`；已无 WMMA 专用参数。
 - 正式 kernel 后显式 `cudaDeviceSynchronize()`，再调用 `cudaProfilerStop()`；不要依赖 Stop、D2H 或 cudaFree 的隐式同步。
 
-## Profiling 基线
+## Profiling 工作流与历史基线
 
-- 命令：`scripts/profile.sh -o sgemm.v0v1.0719`。
-- 报告：`ncu-rep/sgemm.v0v1.0719.ncu-rep`（被 gitignore，只在本地保存）。
-- 脚本使用 `--set full --clock-control none --profile-from-start off --replay-mode application`，只采集 profiler Start/Stop 内的具名 v0/v1 kernel。
+- 当前脚本使用 `--set full --import-source yes --clock-control none --profile-from-start off --replay-mode application`。
+  通过 profiler Start/Stop 采集 `IMPLEMENTATIONS` 中的 kernel（当前 v0～v5），不限定 v0/v1 名字；每个 pass 各自重新 warmup。
+- 历史命令：`scripts/profile.sh -o sgemm.v0v1.0719`；对应报告 `ncu-rep/sgemm.v0v1.0719.ncu-rep`
+  被 gitignore，仅本地保存。当前默认实现已变多，不能假定重跑该命令仍只采 v0/v1。
 - 2026-07-19 报告共 40 个 Application Replay pass：v0/v1 SM 频率为 2.949968/2.936141 GHz，差约 0.47%；DRAM 频率差约 0.0018%；Duration 为 1.683520/0.705600 ms，v1 约快 2.39 倍。
 
 ## 工作区注意事项

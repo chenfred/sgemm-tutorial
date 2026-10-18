@@ -18,6 +18,7 @@ src/sgemm_v1.cu       32×32 shared-memory tiling + 每线程 4 个输出
 src/sgemm_v2.cu       96×96 block tile + 每线程 12×3 register tile
 src/sgemm_v3.cu       普通 LDG register prefetch + shared double buffering
 src/sgemm_v4.cu       cp.async global-to-shared + shared double buffering
+src/sgemm_v5.cu       TF32 WMMA 入门版本（当前仅支持整除尺寸）
 scripts/build.sh      CMake 编译脚本
 scripts/profile.sh    Nsight Compute profiling 脚本
 CMakeLists.txt        CMake 构建配置
@@ -61,7 +62,7 @@ build/sgemm
 ./build/sgemm
 ```
 
-程序会对 `M=1024,N=4096,K=1024` 按顺序运行 v0/v1/v2/v3/v4。每个正式 kernel 前都会运行一次独立的长 warmup，再输出正式调用的耗时、GFLOPS 和 `PASS` / `FAIL` 校验结果。
+程序会对 `M=1024,N=4096,K=1024` 按顺序运行 v0/v1/v2/v3/v4/v5。每个正式 kernel 前都会运行一次独立的长 warmup，再输出正式调用的耗时、GFLOPS 和 `PASS` / `FAIL` 校验结果。
 
 CPU 参考结果由 OpenMP 多线程 `sgemm_golden` 生成一次，`sgemm_verify` 使用 `|out-golden| <= atol + rtol*|golden|` 检查每个实现。FP32 默认采用 [PyTorch `assert_close`](https://docs.pytorch.org/docs/stable/testing.html#torch.testing.assert_close) 的 dtype-specific 容差：`rtol=1.3e-6`、`atol=1e-5`；失败时最多打印前 8 个错误元素。
 
@@ -70,6 +71,10 @@ CPU 参考结果由 OpenMP 多线程 `sgemm_golden` 生成一次，`sgemm_verify
 ```bash
 ./build/sgemm --dry-run
 ```
+
+v5 已加入普通 `IMPLEMENTATIONS`，不需要额外参数。修改 `cases` 时，当前 v5 要求 M/N 是 16 的倍数、K 是 8 的倍数。
+所有版本统一使用 `(i % 100) / 128.0f` 初始化 A/B，先用 TF32/FP32 均可精确表示的输入验证实现，并沿用现有容差。
+换回一般 FP32 输入时，需要另行分析 TF32 量化误差；尺寸整除并不能消除这种精度差异。
 
 ## Profiling
 

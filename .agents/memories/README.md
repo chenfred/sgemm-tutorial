@@ -6,7 +6,7 @@
 
 - [project-state.md](./project-state.md)：当前代码结构、语义、构建/校验/profile 工作流和基准报告。
 - [profiling-lessons.md](./profiling-lessons.md)：NCU replay、warmup、时钟、同步和沙箱相关的已验证经验。
-- [learning-notes.md](./learning-notes.md)：v0/v1 的性能证据、GPU 调度/ILP 认识和 v2 学习方向。
+- [learning-notes.md](./learning-notes.md)：v0～v4 的学习结论、GPU 调度/ILP、register tiling、double buffering 与 cp.async 经验。
 
 ## 维护规则
 

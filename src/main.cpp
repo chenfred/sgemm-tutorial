@@ -17,11 +17,8 @@ struct SgemmResult {
 };
 
 static const std::vector<SgemmImplementation> IMPLEMENTATIONS = {
-    {"sgemm_v0", sgemm_v0_do},
-    {"sgemm_v1", sgemm_v1_do},
-    {"sgemm_v2", sgemm_v2_do},
-    {"sgemm_v3", sgemm_v3_do},
-    {"sgemm_v4", sgemm_v4_do},
+    {"sgemm_v0", sgemm_v0_do}, {"sgemm_v1", sgemm_v1_do}, {"sgemm_v2", sgemm_v2_do},
+    {"sgemm_v3", sgemm_v3_do}, {"sgemm_v4", sgemm_v4_do}, {"sgemm_v5", sgemm_v5_do},
 };
 
 static void test_sgemm(int M, int N, int K, bool dry_run) {
@@ -33,11 +30,12 @@ static void test_sgemm(int M, int N, int K, bool dry_run) {
     std::vector<float> h_A(static_cast<size_t>(M) * K);
     std::vector<float> h_B(static_cast<size_t>(K) * N);
     std::vector<float> h_C(static_cast<size_t>(M) * N);
+    // 使用 TF32/FP32 都能精确表示的二进制分数，先验证 WMMA 实现，不混入输入量化误差。
     for (size_t i = 0; i < h_A.size(); ++i) {
-        h_A[i] = static_cast<float>(i % 100) / 100.0f;
+        h_A[i] = static_cast<float>(i % 100) / 128.0f;
     }
     for (size_t i = 0; i < h_B.size(); ++i) {
-        h_B[i] = static_cast<float>(i % 100) / 100.0f;
+        h_B[i] = static_cast<float>(i % 100) / 128.0f;
     }
 
     std::vector<float> golden;
@@ -105,7 +103,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 当前仅保留用于对比 v0/v1 NCU 报告的基准尺寸。
+    // v5 暂只支持完整 WMMA tile：M/N 是 16 的倍数，K 是 8 的倍数。
     int cases[][3] = {
         {1024, 4096, 1024},
     };

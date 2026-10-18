@@ -1,11 +1,14 @@
-# SGEMM v4 cp.async 学习与开发计划
+# SGEMM v4 cp.async 学习与开发计划（已实现）
 
-更新时间：2026-08-17。
+状态核对：2026-10-18；初始计划：2026-08-17。
 
-2026-09-08 实现状态：用户明确要求便于 async 与 PTX 入门，v4_1 已直接使用 inline PTX，
-因此下文原定“暂不进入 inline PTX”和 C primitives API 选择已被本次需求替代。
-双 stage 版本已通过默认与四组边界尺寸，确认 LDGSTS、无 spill；memcheck 被 WDDM 调试接口
-初始化失败阻止，racecheck 尚未执行。当前结果见 `.agents/memories/project-state.md`；NCU 对照留待学习阶段继续。
+正式 `sgemm_v4` 已在提交 `83b6fae` 中由 trial_v4_1 复制转正，实验版保留；正式版复习见 `docs/sgemm_v4.md`。
+用户选择 inline PTX 入门，因此下文 C primitives 的 API 路线是历史备选，不需要补做才能继续学习。
+另已实践 trial_v4_2 的环形流水线（当前两 stage，曾试过三 stage），不再把它当作未开始的开发任务。
+
+历史 RTX 3060 Laptop 测试中，v4_1 通过默认与四组边界尺寸，并确认 LDGSTS、无 spill；
+memcheck 被 WDDM 调试接口初始化失败阻止，racecheck 尚未执行，稳定 NCU 对照待补充。
+当前本机为 RTX 5080，本轮仅同步上下文，未重新测试。机器、配置与证据边界见 `.agents/memories/project-state.md`。
 
 ## 1. 这一阶段只学习什么
 
@@ -29,7 +32,7 @@ global --------async--------> shared[next]
 3. 在读取目标 shared stage 前 wait；
 4. 用 block barrier 处理跨线程可见性以及 shared stage 的安全复用。
 
-以下内容暂不进入主线：inline PTX、TMA、warp specialization、三重缓冲、重新搜索 tile 参数、为了 16-byte copy 重排全部线程映射。它们先等典型优化模式学完后再回看。
+inline PTX 和三 stage 已在后续实践；TMA、warp specialization、tile 搜索和 16-byte copy 重排仍后延。
 
 ## 2. 先建立正确的概念边界
 
@@ -79,7 +82,7 @@ v4: next async global-to-shared copy -------------> shared[next]
 
 ## 4. API 选择
 
-第一个版本 `sgemm_trial_v4_1` 使用：
+初始计划选用下列 primitives；实际 v4_1 / 正式 v4 已改用 inline PTX 的 copy、commit_group、wait_group：
 
 ```cpp
 #include <cuda_pipeline.h>
@@ -269,8 +272,9 @@ compute-sanitizer --tool racecheck build/sgemm
 
 - [x] 已讨论 kernel 内 `cp.async` 与 host `cudaMemcpyAsync` 的区别。
 - [x] 已讨论 issue、commit、wait、block barrier、每线程分组和等待参数语义。
-- [ ] `sgemm_trial_v4_1` 通过默认与非整除尺寸，并通过 memcheck/racecheck。
+- [x] `sgemm_trial_v4_1` 通过默认与非整除尺寸（历史 RTX 3060 Laptop 测试）。
+- [ ] 完成有效的 memcheck/racecheck；历史 WDDM 工具初始化失败不算通过。
 - [x] SASS 确认生成异步 global-to-shared 路径，且没有 register spill。
 - [ ] 用一份简化 NCU 报告比较 v3/v4_1 的时间、寄存器和主要 stall。
 - [ ] 无论是否加速，都记录原因并收束；不要立刻进入 TMA 或超参数搜索。
-- [ ] 若机制清楚且证据充分，再决定是否转正为 `sgemm_v4`。
+- [x] 已由 trial_v4_1 复制转正为 `sgemm_v4`，保留两个 trial。
